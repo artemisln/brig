@@ -86,7 +86,7 @@ release cannot be verified without cosign.
 ### Settings
 
 ```bash
-BRIG_INSTALL_DIR=~/bin BRIG_VERSION=v0.1.0-rc18 sh install.sh
+BRIG_INSTALL_DIR=~/bin BRIG_VERSION=v0.2.0 sh install.sh
 ```
 
 - `BRIG_INSTALL_DIR` overrides the destination. Unset, it installs to

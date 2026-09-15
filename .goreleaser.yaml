@@ -116,13 +116,14 @@ sboms:
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
 
-# The release notes are rendered by git-cliff from cliff.toml in the release
-# workflow and handed over with --release-notes, so this is disabled: one
-# place decides what a release says. A run without the flag then publishes an
-# empty body, which is visible, rather than a second, differently grouped
-# changelog, which is not.
+# The release notes come from git-cliff (cliff.toml), handed over with
+# --release-notes in the release workflow. goreleaser reads that file inside
+# its changelog pipe, so the pipe stays enabled; `disable: true` would skip
+# the flag with it. With the flag set, nothing below is used. Without it, a
+# run falls back to this plain git log, which a reader can tell apart from
+# the git-cliff output.
 changelog:
-  disable: true
+  use: git
 
 release:
   # Drafts, so a tag never publishes itself before someone has looked at the
@@ -149,12 +150,16 @@ homebrew_casks:
     repository:
       owner: brig-sh
       name: homebrew-brig
-      branch: main
+      # The branch the cask is pushed to, and the head of the pull request
+      # below. `main` here would mean a direct push to the tap, with no PR.
+      branch: brig-{{ .Version }}
       # Open a pull request rather than pushing to the tap. The cask is what
       # people install; a bad one is worth a second pair of eyes, and the PR
       # is a place to see the diff.
       pull_request:
         enabled: true
+        base:
+          branch: main
       # The tap is a different repository, so the release job's built-in
       # GITHUB_TOKEN cannot write to it. This is a fine-grained PAT with
       # contents:write on brig-sh/homebrew-brig, stored as a secret on this

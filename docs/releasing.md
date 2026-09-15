@@ -21,7 +21,7 @@ around it, in order.
 - Read the notes the release will carry before the tag exists:
 
   ```bash
-  make notes TAG=v0.1.0-rc18
+  make notes TAG=v0.2.0
   ```
 
   This runs git-cliff over the commits since the previous tag, with the
@@ -33,8 +33,8 @@ around it, in order.
 - Tag the release commit and push the tag:
 
   ```bash
-  git tag v0.1.0-rc18
-  git push origin v0.1.0-rc18
+  git tag v0.2.0
+  git push origin v0.2.0
   ```
 
   The push starts the workflow. It builds both binaries for every target,
@@ -98,20 +98,28 @@ around it, in order.
   header and hands the tap over to this workflow. Do not hand-edit a cask
   the workflow now owns.
 
+- The cask PR opens while the release is still a draft. goreleaser's cask
+  pipe checks `skip_upload` and the prerelease marker, not the draft flag.
+  The tap's CI compares every cask against the published release, and a
+  draft is invisible to its token, so that check fails until the draft is
+  published. Publish the draft first, then merge the cask PR. Expect the PR
+  to need `brew style --fix Casks/brig.rb` on its branch as well: goreleaser
+  writes the cask with its own indentation.
+
 ## After the tag
 
 - Ask the module proxy for the new version once, so pkg.go.dev indexes it.
   pkg.go.dev serves only what the proxy has already seen:
 
   ```bash
-  GOPROXY=https://proxy.golang.org go list -m github.com/brig-sh/brig@v0.1.0-rc18
+  GOPROXY=https://proxy.golang.org go list -m github.com/brig-sh/brig@v0.2.0
   ```
 
 - Update the documentation a release touches. Grep for the previous version
   before publishing and change every place that still quotes it:
 
   ```bash
-  git grep -n 0.1.0-rc17
+  git grep -n 0.1.0-rc18
   ```
 
   At least `VERSION`, and every page that quotes a hull version:

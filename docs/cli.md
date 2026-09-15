@@ -234,7 +234,7 @@ secret store that will not open. Every other finding, including one marked
 brig version
 ```
 
-Prints `brig v0.1.0-rc18` in this release. `--version` is the same command.
+Prints `brig v0.2.0` in this release. `--version` is the same command.
 
 ### `brig completion`
 
