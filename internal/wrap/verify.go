@@ -331,6 +331,26 @@ func (c *Config) verifyBootAssets() error {
 
 	switch res.Outcome {
 	case verify.Verified:
+		// The signature covers the published bundle. BRIG_BOOT_ASSETS turns the
+		// fetch off, so what boots under it is whatever sits in that directory
+		// -- present and non-empty is the whole of the check there -- and the
+		// bundle vouches for none of it. That keeps the boot assets out of the
+		// summary rather than in it qualified: "verified" has to be a word a
+		// reader can take at face value.
+		if dir, override := runtime.BootAssetsOverride(); override {
+			// An alert, in the words the NotOurs row ends on, because it is the
+			// same answer: nothing was checked about the kernel. It claims no
+			// provenance -- `brig doctor` sends a user with no assets to a
+			// directory that has them, which is often a bundle an earlier run
+			// downloaded. The per-check detail waits for --verbose, which has
+			// room to name the bundle and the files apart.
+			c.alertf("the boot assets in %s are the ones BRIG_BOOT_ASSETS points at, taken "+
+				"as they were found, so nothing was checked about the kernel this sandbox "+
+				"boots", dir)
+			c.progressf("boot assets %s: signature verified, which is a check of the "+
+				"published bundle and not of the files in %s", ref, dir)
+			return nil
+		}
 		// Narration for the same reason the image's success line is: the kernel
 		// verified, and there is nothing here for anybody to do about it. It
 		// joins the summary the run prints for the whole step.

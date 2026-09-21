@@ -91,6 +91,43 @@ func TestBootArtifactsNeverFetchesOverAnExplicitDir(t *testing.T) {
 	}
 }
 
+// BootAssetsOverride answers for the boot path, so it is pinned against what
+// that path does rather than against the variable it reads: an override means
+// the fetch does not run, and the files under that directory are what boots.
+func TestBootAssetsOverrideNamesTheDirectoryThatBootsUnfetched(t *testing.T) {
+	t.Setenv("BRIG_BOOT_ASSETS", "")
+	if dir, ok := BootAssetsOverride(); ok {
+		t.Fatalf("an unset BRIG_BOOT_ASSETS reported an override of %q", dir)
+	}
+
+	staged := t.TempDir()
+	for _, name := range []string{bootKernelName(), bootInitrdName} {
+		if err := os.WriteFile(filepath.Join(staged, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("BRIG_BOOT_ASSETS", staged)
+
+	dir, ok := BootAssetsOverride()
+	if !ok || dir != staged {
+		t.Fatalf("BootAssetsOverride() = %q, %v; want %q, true", dir, ok, staged)
+	}
+
+	kernel, initrd, err := bootArtifacts(nil, func(string) error {
+		t.Fatal("fetcher ran despite an explicit BRIG_BOOT_ASSETS")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{kernel, initrd} {
+		if filepath.Dir(path) != staged {
+			t.Errorf("booting %s, which is not the directory BootAssetsOverride named (%s)",
+				path, staged)
+		}
+	}
+}
+
 // A zero-length file satisfies a bare existence check and then fails at boot,
 // which is much harder to diagnose. Treat it as missing.
 func TestBootArtifactsTreatsEmptyFilesAsMissing(t *testing.T) {

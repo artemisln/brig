@@ -78,8 +78,21 @@ type assetFetcher func(dir string) error
 // per-platform default below applies.
 type assetLocator func() (string, error)
 
+// BootAssetsOverride reports the directory BRIG_BOOT_ASSETS names, and whether
+// it names one at all.
+//
+// Exported for the reason BootAssetsRef is: the layer that owns BRIG_VERIFY has
+// to know what it is vouching for. The variable turns the fetch off, so what
+// sits under it is the user's own and the published bundle vouches for none of
+// it. One reader for it, so the boot path, the doctor row and the verification
+// report cannot disagree about where the kernel comes from.
+func BootAssetsOverride() (dir string, ok bool) {
+	dir = os.Getenv("BRIG_BOOT_ASSETS")
+	return dir, dir != ""
+}
+
 func bootArtifacts(locate assetLocator, fetch assetFetcher) (kernel, initrd string, err error) {
-	explicit := os.Getenv("BRIG_BOOT_ASSETS")
+	explicit, _ := BootAssetsOverride()
 	dir := explicit
 	if dir == "" && locate != nil {
 		// A runtime that cannot answer is not fatal: fall through to the

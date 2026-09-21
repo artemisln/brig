@@ -775,7 +775,9 @@ says so and tells you what to fetch.
 
 Setting `BRIG_BOOT_ASSETS` turns the fetching off entirely. That variable
 points at a build you are iterating on, and downloading a release bundle
-over your own work is the opposite of helpful. `BRIG_BOOT_ASSETS_REF`
+over your own work is the opposite of helpful. Brig then reports no verified
+boot assets: the signature it checks is on the published bundle, and the
+kernel that boots is yours. `BRIG_BOOT_ASSETS_REF`
 pins a specific bundle instead of the current one for your platform.
 
 The bundle is published as the OCI artifact `ghcr.io/nofireai/hull-assets`,

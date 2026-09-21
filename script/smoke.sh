@@ -1772,12 +1772,17 @@ grep 'argv: run ' "$STUB_LOG" | tail -1 | grep -q '@sha256:' \
   && ok "the verified digest is what hull was told to boot" \
   || bad "hull was told to boot the tag, not the verified digest: $(grep 'argv: run ' "$STUB_LOG" | tail -1)"
 
-# What the default run gets instead of the detail is the outcome, in one line.
-# One line for the whole step, not one per check: the shipped profiles boot a
-# downloaded kernel as well as an image, so both checks reach the same summary.
+# What the default run gets instead of the detail is the outcome, in one line
+# for the whole step. It names the image alone here: BRIG_BOOT_ASSETS points at
+# the stand-in kernels this script stages, which no fetch and no check touched.
 case "$out" in
-  *"brig: image and boot assets verified"*) ok "a default run says verification held" ;;
+  *"brig: image verified"*) ok "a default run says verification held" ;;
   *) bad "a default run says verification held -- got: $out" ;;
+esac
+# And the kernel outside that claim is named rather than counted into it.
+case "$out" in
+  *"BRIG_BOOT_ASSETS points at"*) ok "a kernel brig never fetched is not reported as verified" ;;
+  *) bad "a kernel brig never fetched is not reported as verified -- got: $out" ;;
 esac
 # The policy that outcome held under is the envelope's VERIFY row, which
 # --verbose carries. Stating neither would leave "it verified" to be inferred

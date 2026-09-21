@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -42,7 +41,7 @@ func Version(bin string) (string, error) {
 // how to get it, and downloading a bundle is a side effect a diagnostic has no
 // business having.
 func BootAssetsDir() (dir string, present bool, err error) {
-	dir = os.Getenv("BRIG_BOOT_ASSETS")
+	dir, _ = BootAssetsOverride()
 	if dir == "" {
 		dir, err = defaultBootAssetsDir()
 		if err != nil {

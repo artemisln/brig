@@ -563,6 +563,11 @@ kernel on disk to the artifact it just verified. `BRIG_VERIFY_REGISTRY`,
 `BRIG_VERIFY_IDENTITY` and `BRIG_VERIFY_ISSUER` repoint the image's trust
 policy only: the kernel's identity is fixed.
 
+So a run with `BRIG_BOOT_ASSETS` set reports no verified boot assets. The
+fetch is off there, and the signature that checked out sits on an artifact
+the boot does not use. The run names the directory instead, and the summary
+line covers the image alone.
+
 ## Brig's own binaries
 
 Releases are signed with keyless cosign as well. There is no key to

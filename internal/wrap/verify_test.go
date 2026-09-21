@@ -477,6 +477,76 @@ func TestGenericBootVerifiesTheBundle(t *testing.T) {
 	}
 }
 
+// "boot assets verified" is a claim about the kernel this sandbox starts. The
+// check covers a registry reference, and BRIG_BOOT_ASSETS skips the fetch, so
+// under it what boots is whatever sits in that directory. Six of the eight
+// shipped profiles boot a bundle, which makes this their ordinary path.
+func TestBootAssetsVerifiedIsNotSaidOverFilesBrigNeverFetched(t *testing.T) {
+	cosign := fakeCosign(t, "sha256:"+strings.Repeat("a", 64), false)
+
+	// No override: the files that boot are the fetch's own, under the reference
+	// just verified, so the claim stands and joins the summary.
+	t.Setenv("BRIG_BOOT_ASSETS", "")
+	fetched := verifyConfig(t, "ghcr.io/brig-sh/claude-code:arm64", verify.Warn)
+	fetched.Profile.GenericBoot = true
+	fetched.VerifyPolicy.Cosign = cosign
+	if err := fetched.verifyBootAssets(); err != nil {
+		t.Fatalf("a signed bundle was refused: %v", err)
+	}
+	if len(fetched.verified) != 1 || fetched.verified[0] != "boot assets" {
+		t.Fatalf("a verified bundle did not reach the summary: %v", fetched.verified)
+	}
+
+	// Override: same reference, same cosign, same signature, other subject.
+	staged := t.TempDir()
+	t.Setenv("BRIG_BOOT_ASSETS", staged)
+	own := verifyConfig(t, "ghcr.io/brig-sh/claude-code:arm64", verify.Warn)
+	own.Profile.GenericBoot = true
+	own.VerifyPolicy.Cosign = cosign
+	if err := own.verifyBootAssets(); err != nil {
+		t.Fatalf("BRIG_BOOT_ASSETS was refused rather than reported: %v", err)
+	}
+	if len(own.verified) != 0 {
+		t.Errorf("the run vouches for a kernel it never looked at: %v", own.verified)
+	}
+
+	own.sayVerified()
+	said := own.Err.(*bytes.Buffer).String()
+	if strings.Contains(said, "boot assets verified") {
+		t.Errorf("the summary claims the boot assets verified:\n%s", said)
+	}
+	// Named, so which kernel went unchecked is read rather than inferred.
+	if !strings.Contains(said, staged) {
+		t.Errorf("the line does not name the directory the kernel comes from:\n%s", said)
+	}
+	if !strings.Contains(said, "nothing was checked") {
+		t.Errorf("the line does not say the kernel went unchecked:\n%s", said)
+	}
+	// "verified" stays out of a line that says the opposite: the bundle
+	// checking out is per-check detail, which the default run holds back.
+	if strings.Contains(said, "signature verified") {
+		t.Errorf("the default run reported the per-check detail:\n%s", said)
+	}
+
+	// --verbose has room for the detail, and names both subjects apart: the
+	// bundle that checked out, and the directory the kernel comes from.
+	verbose := verifyConfig(t, "ghcr.io/brig-sh/claude-code:arm64", verify.Warn)
+	verbose.Profile.GenericBoot = true
+	verbose.VerifyPolicy.Cosign = cosign
+	detail := &bytes.Buffer{}
+	verbose.Progress = detail
+	verbose.Verbosity = Verbose
+	if err := verbose.verifyBootAssets(); err != nil {
+		t.Fatalf("--verbose changed the decision: %v", err)
+	}
+	if !strings.Contains(detail.String(), "signature verified") {
+		t.Errorf("the verbose detail does not say the bundle verified:\n%s", detail.String())
+	}
+	if !strings.Contains(detail.String(), staged) {
+		t.Errorf("the verbose detail does not name the files that boot instead:\n%s", detail.String())
+	}
+}
+
 // And the check is actually reached on the way to a boot. Calling
 // verifyBootAssets directly proves what it decides, not that anything asks it:
 // with the call removed from EnsureRunning every test above still passed, which
