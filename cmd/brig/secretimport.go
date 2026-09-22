@@ -185,11 +185,12 @@ func importOne(
 	if err != nil {
 		return err
 	}
-	// Before the write, not after it. security truncates an over-long line
-	// silently on a four-byte boundary, so the short value still base64-decodes
-	// and still resolves -- and verify explicitly cannot roll back an update.
-	// Checking here is what stops a re-import destroying a good value and
-	// leaving a resolvable bad one behind.
+	// For a backend that declares a ceiling: refused here, before the write,
+	// so a re-import cannot destroy a good value on its way to being refused.
+	// No shipped backend declares one today. The keychain keeps the value in
+	// an encrypted file and only a fixed-size key on security's line, and a
+	// Secret Service keyring never had a ceiling. The seam stays for one that
+	// does.
 	if sizer, ok := store.(secret.Sizer); ok {
 		if max := sizer.MaxValue(d.Name, exists); len(value) > max {
 			return fmt.Errorf("the value for %q is %d bytes and the store takes at most %d, "+

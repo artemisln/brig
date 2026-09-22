@@ -284,7 +284,10 @@ What that means for the things this document is about:
 - **The value never appears in argv, and never reaches `security` at all.**
   The keychain item holds a 32-byte key, not the value (see below). The whole
   `add-generic-password` command, base64 key and all, goes to `security -i`
-  down a pipe. Brig's own command line is `security -i` and nothing else. This is the same
+  down a pipe. Brig's own command line is `security -i` and nothing else.
+  The one exception is a secret stored by a Brig older than the envelope:
+  its value still comes back on `security`'s stdout when it is read, until
+  the next `update` or import moves it. This is the same
   guarantee the forwarding path makes above, for the same reason. `security -i`
   reads one command per line and blocks for the next. So the write is on the
   process table only for as long as the pipe stays open. Reproduce it by
