@@ -68,8 +68,9 @@ func (k keychain) Kind() string { return "keychain" }
 const maxLine = 4096
 
 // writePrefix is the write command up to and including the "-w " that the
-// value follows. Splitting it out is what lets MaxValueFor price the value
-// against the command that will actually carry it.
+// key line follows. It is a function of its own because putItem builds the
+// line in two parts, and TestKeyLineNeverNearsTheBuffer measures this part
+// against security's buffer without a key.
 //
 // Quoting is safe to do by hand here because nothing variable on this line
 // needs it: the service is a constant, the key is base64, and the name has
@@ -288,6 +289,10 @@ func (k keychain) Read(name string) ([]byte, error) {
 		return nil, err
 	}
 	value, err := unseal(name, key, blob)
+	if errors.Is(err, errNotSealed) {
+		return nil, fmt.Errorf("%s is not a brig value file, so something other than brig put it "+
+			"there. Store %q again: brig secret update %s, or brig secret import", path, name, name)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("the value at %s does not open with the key stored for %q, so one of "+
 			"them was changed outside brig. Store it again: brig secret update %s, or brig secret import",
