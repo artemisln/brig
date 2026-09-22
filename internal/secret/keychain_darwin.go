@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
+	"io/fs"
 	"os/exec"
 	"slices"
 	"strings"
@@ -53,7 +53,6 @@ type keychain struct{ service string }
 // that has to change, instead of at some distant call site.
 var _ Store = keychain{}
 var _ Annotator = keychain{}
-var _ Sizer = keychain{}
 
 func open() (Store, error) { return keychain{service: service}, nil }
 
@@ -62,8 +61,10 @@ func (k keychain) Kind() string { return "keychain" }
 // maxLine is the buffer security(1) reads one interactive command into.
 // Measured on macOS 15: a line of 4095 characters and its newline is accepted
 // whole, and a longer one is truncated to that with no error anywhere. The
-// ceiling is therefore a property of the whole command, not of the value --
-// a longer secret name leaves fewer characters for the value it names.
+// value used to ride this line, which put a ceiling of about 3 KB on it. It
+// no longer does: the line carries a fixed-size key (see envelope_darwin.go),
+// and TestKeyLineNeverNearsTheBuffer pins that the longest possible key line
+// stays well inside this.
 const maxLine = 4096
 
 // writePrefix is the write command up to and including the "-w " that the
@@ -71,7 +72,7 @@ const maxLine = 4096
 // against the command that will actually carry it.
 //
 // Quoting is safe to do by hand here because nothing variable on this line
-// needs it: the service is a constant, the value is base64, and the name has
+// needs it: the service is a constant, the key is base64, and the name has
 // been through ValidName, so it holds only letters, digits, - and _. The
 // label is the one argument with a space in it, and its shape is fixed. -j's
 // argument is safe unquoted for the same reason: Encode's base64url output
@@ -114,100 +115,95 @@ func (k keychain) writePrefix(name string, update bool, p Provenance) (string, e
 	return strings.Join(append(args, "-w"), " ") + " ", nil
 }
 
-// assumedFromLen is what MaxValue prices against before it knows what
-// provenance an import will attach: generous for a keychain service name or
-// a file path, and pessimistic enough that Write's real ceiling --
-// MaxValueFor, priced against the provenance actually being attached -- is
-// never smaller than what this promised a caller that has not chosen one
-// yet.
-//
-// That promise holds up to this length and no further, which is the honest
-// limit of a fixed assumption. A longer locator makes MaxValueFor the smaller
-// number, and the caller gets a refusal from Write carrying Write's own
-// accurate ceiling -- never a write security truncates, which is the outcome
-// this arithmetic exists to prevent.
-const assumedFromLen = 128
-
-// MaxValue is the Sizer's provenance-free ceiling: for a caller, such as a
-// CLI pre-check, that wants to size a value before it has decided what
-// provenance goes with it. It must not be the ceiling Write itself uses --
-// see MaxValueFor and Write's own comment on why.
-func (k keychain) MaxValue(name string, update bool) int {
-	// ExpiresAt is set, not left at zero, because it is omitempty: a zero one
-	// disappears from the encoded document and makes this ceiling LARGER than
-	// the one Write will apply to a real import that carries an expiry --
-	// which is the opposite of the promise assumedFromLen is written against.
-	// The value is only a length; math.MaxInt64 is the longest it encodes to.
-	return k.MaxValueFor(name, update, Provenance{
-		V:         ProvenanceVersion,
-		From:      strings.Repeat("x", assumedFromLen),
-		ExpiresAt: math.MaxInt64,
-	})
-}
-
-// MaxValueFor is the largest raw value that fits on the command line for this
-// name together with this provenance. Base64 turns three bytes into four
-// characters, so the budget divides by four and multiplies by three.
-//
-// Write prices against this, with the provenance it is actually about to
-// attach, rather than against MaxValue's provenance-free number -- the
-// comment now rides the same line as the value, so a ceiling that does not
-// know about it would pass a write the line cannot carry.
-func (k keychain) MaxValueFor(name string, update bool, p Provenance) int {
-	prefix, err := k.writePrefix(name, update, p)
-	if err != nil {
-		// Encode fails only if json.Marshal does, which cannot happen for
-		// this fixed shape. Reporting no room is safer than dividing by a
-		// length that was never computed.
-		return 0
-	}
-	return (maxLine - 1 - len(prefix)) / 4 * 3
-}
-
 // Write stores a value together with its provenance, creating or updating.
 // Create and Update are this with the zero Provenance: on a create that is no
 // -j at all, so a hand-created secret's comment is empty rather than a
 // zero-value JSON document; on an update it is an empty -j, which clears any
 // comment the previous value had. DecodeProvenance reads both back as absent.
 //
-// The value is base64-encoded because security's command line is line-based:
-// a newline in a raw value would end the line early, so an SSH key or any
-// binary blob could not round-trip. Encoding also makes the NUL byte and the
-// non-UTF8 byte ordinary, and -- because base64 spells everything in letters,
-// digits, +, / and = -- it leaves nothing on the line that would need quoting.
+// The value does not go to the keychain. The keychain item holds a 32-byte
+// key, and the value goes to a file under brig's state directory, encrypted
+// under that key (see envelope_darwin.go). The item is the same size for
+// every secret, so the size ceiling that used to live here is gone with the
+// value that hit it.
 //
-// The command goes to `security -i` on stdin rather than to argv, so the value
-// stays out of `ps` exactly as the prompt form kept it out. The prompt form is
-// not used because it truncates at 128 characters: an ANTHROPIC_API_KEY is
-// about 108 bytes, which encodes to 144, and the excess was dropped silently
-// on a multiple of four, so the short value still decoded cleanly and nothing
-// failed anywhere. Interactive mode raises that ceiling to a whole line but
-// does not remove it, which is why the length is checked below rather than
-// trusted.
+// The order of the two writes is different on a create and an update, and
+// each order is chosen for what a failure between them leaves behind.
 //
-// The ceiling checked is MaxValueFor(name, update, p) -- priced against the
-// provenance actually being attached -- and not MaxValue's provenance-free
-// number. Pricing against the wrong one is the obvious minimal edit and it is
-// wrong: the comment now shares the line with the value, so a value that
-// alone fits the provenance-free budget can still push the whole line past
-// security's buffer once a long provenance is appended. security answers
-// that by truncating the line silently on a four-byte boundary, not by
-// refusing it -- so the short value still base64-decodes, still resolves,
-// and verify (below) cannot roll back an update that landed on top of a good
-// value. Checking the real ceiling here is what turns that into a refusal
-// before anything is sent to security at all.
+// A create writes the item first. security refuses a duplicate with its own
+// exit code, so a taken name is refused before any file is touched. If the
+// file then cannot be written, the item is removed again: a caller told the
+// create failed expects nothing to be there.
+//
+// An update writes the file first, under the key the item already holds, and
+// only then rewrites the item to carry the new provenance. If the second
+// step fails the value is new and the provenance is old. That is the safer
+// direction: an old provenance can only make the stale-credential warning
+// fire early, while a new provenance over an old value would keep it quiet.
+// The key itself never changes on an update, so the file rename is the one
+// step that changes the value, and it is atomic.
+//
+// An item written before the envelope existed holds the value itself. An
+// update of one draws a key, writes the file, and then replaces the item
+// with the key. If that last step fails the old item still holds the old
+// value and Read still returns it, and the file is overwritten by the next
+// update.
 func (k keychain) Write(name string, value []byte, p Provenance, update bool) error {
-	if max := k.MaxValueFor(name, update, p); len(value) > max {
-		return fmt.Errorf("the value for %q is %d bytes, and with its provenance the keychain takes at most %d",
-			name, len(value), max)
+	var key []byte
+	if update {
+		line, err := k.readItem(name)
+		if err != nil {
+			return err
+		}
+		if key, _, err = keyFromItem(line); err != nil {
+			return fmt.Errorf("%q: %w", name, err)
+		}
 	}
+	if key == nil {
+		var err error
+		if key, err = newKey(); err != nil {
+			return err
+		}
+	}
+	blob, err := seal(name, key, value)
+	if err != nil {
+		return err
+	}
+	if update {
+		if _, err := writeValueFile(name, blob); err != nil {
+			return err
+		}
+		if err := k.putItem(name, keyItem(key), p, true); err != nil {
+			return err
+		}
+		return k.verify(name, value, true)
+	}
+	if err := k.putItem(name, keyItem(key), p, false); err != nil {
+		return err
+	}
+	if _, err := writeValueFile(name, blob); err != nil {
+		_ = k.deleteItem(name)
+		return err
+	}
+	return k.verify(name, value, false)
+}
+
+// putItem stores line as the keychain item for name.
+//
+// The line is a marker and a base64 key, so it holds only letters, digits,
+// +, / and = beyond the colon: nothing on security's command line needs
+// quoting, and no byte of it can end the line early.
+//
+// The command goes to `security -i` on stdin rather than to argv, so the key
+// stays out of `ps` exactly as the value did before it. The prompt form is
+// not used because it truncates at 128 characters.
+func (k keychain) putItem(name, line string, p Provenance, update bool) error {
 	prefix, err := k.writePrefix(name, update, p)
 	if err != nil {
 		return err
 	}
-	line := prefix + base64.StdEncoding.EncodeToString(value)
 	cmd := exec.Command(securityBin, "-i")
-	cmd.Stdin = strings.NewReader(line + "\n")
+	cmd.Stdin = strings.NewReader(prefix + line + "\n")
 	var errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &bytes.Buffer{}, &errb
 	if err := cmd.Run(); err != nil {
@@ -216,7 +212,7 @@ func (k keychain) Write(name string, value []byte, p Provenance, update bool) er
 		}
 		return securityError(err, errb.String())
 	}
-	return k.verify(name, value, update)
+	return nil
 }
 
 // write is Create and Update's path: the zero Provenance, so a plain secret
@@ -228,11 +224,10 @@ func (k keychain) write(name string, value []byte, update bool) error {
 
 // verify reads back what write just stored.
 //
-// The length check above rests on brig's arithmetic agreeing with security's,
-// and security answers a line it cannot fit by shortening it rather than by
-// refusing it -- so the failure this guards against is silent by construction.
-// One extra decrypt on a write a person typed is a cheap way to make "stored"
-// mean it.
+// The write is two steps in two places, and this is the one check that both
+// landed and agree: the item holds the key that opens the file, and the file
+// holds the value that was given. One extra decrypt on a write a person typed
+// is a cheap way to make "stored" mean it.
 //
 // A create that stored the wrong thing is removed, because a caller told the
 // write failed will reasonably expect nothing to be there. An update cannot be
@@ -248,8 +243,8 @@ func (k keychain) verify(name string, value []byte, update bool) error {
 	if !update {
 		_ = k.Delete(name)
 	}
-	return fmt.Errorf("the keychain stored %d bytes of the %d given for %q, so the value was truncated",
-		len(stored), len(value), name)
+	return fmt.Errorf("%q read back as %d bytes, not the %d given, so the write did not land",
+		name, len(stored), len(value))
 }
 
 func (k keychain) Create(name string, value []byte) error {
@@ -260,8 +255,53 @@ func (k keychain) Create(name string, value []byte) error {
 }
 
 func (k keychain) Read(name string) ([]byte, error) {
-	if err := ValidName(name); err != nil {
+	line, err := k.readItem(name)
+	if err != nil {
 		return nil, err
+	}
+	key, enveloped, err := keyFromItem(line)
+	if err != nil {
+		return nil, fmt.Errorf("%q: %w", name, err)
+	}
+	if !enveloped {
+		// Written before the envelope existed: the item is the value.
+		value, err := base64.StdEncoding.DecodeString(line)
+		if err != nil {
+			// Reachable for an item something other than brig put in the
+			// namespace. Without the name and the "brig's encoding" part,
+			// the caller gets a byte offset into a string they never
+			// supplied.
+			return nil, fmt.Errorf("the value stored for %q is not in brig's encoding, so brig did not write it: %w",
+				name, err)
+		}
+		return value, nil
+	}
+	blob, path, err := readValueFile(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Not ErrNotFound: the secret exists, and half of it is gone.
+			// Reporting absence would let an import write a new key over
+			// this one without anyone learning the file had been removed.
+			return nil, fmt.Errorf("the key for %q is in the keychain, but its value at %s is missing. "+
+				"Store it again: brig secret update %s, or brig secret import", name, path, name)
+		}
+		return nil, err
+	}
+	value, err := unseal(name, key, blob)
+	if err != nil {
+		return nil, fmt.Errorf("the value at %s does not open with the key stored for %q, so one of "+
+			"them was changed outside brig. Store it again: brig secret update %s, or brig secret import",
+			path, name, name)
+	}
+	return value, nil
+}
+
+// readItem returns the line the keychain item holds for name, as stored: a
+// marked key for a secret in the envelope, base64 of the value for one
+// written before it.
+func (k keychain) readItem(name string) (string, error) {
+	if err := ValidName(name); err != nil {
+		return "", err
 	}
 	cmd := exec.Command(securityBin, "find-generic-password",
 		"-s", k.service, "-a", name, "-w")
@@ -269,20 +309,12 @@ func (k keychain) Read(name string) ([]byte, error) {
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
 		if status(err) == codeNotFound {
-			return nil, ErrNotFound
+			return "", ErrNotFound
 		}
-		return nil, securityError(err, errb.String())
+		return "", securityError(err, errb.String())
 	}
 	// -w prints the value and a newline of its own.
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimRight(out.String(), "\n"))
-	if err != nil {
-		// Reachable for an item something other than brig put in the
-		// namespace. Without the name and the "brig's encoding" part, the
-		// caller gets a byte offset into a string they never supplied.
-		return nil, fmt.Errorf("the value stored for %q is not in brig's encoding, so brig did not write it: %w",
-			name, err)
-	}
-	return raw, nil
+	return strings.TrimRight(out.String(), "\n"), nil
 }
 
 // Update refuses to create.
@@ -317,10 +349,27 @@ func (k keychain) exists(name string) error {
 	return nil
 }
 
+// Delete removes the item and the value file. The item goes first: once it
+// is gone the file is ciphertext nothing can open, so a failure between the
+// two leaves nothing readable behind. A file with no item, left by a create
+// that failed between its two steps, is swept up here too, and the caller
+// still learns there was no secret.
 func (k keychain) Delete(name string) error {
 	if err := ValidName(name); err != nil {
 		return err
 	}
+	itemErr := k.deleteItem(name)
+	if itemErr != nil && !errors.Is(itemErr, ErrNotFound) {
+		return itemErr
+	}
+	if err := removeValueFile(name); err != nil {
+		return err
+	}
+	return itemErr
+}
+
+// deleteItem removes the keychain item alone.
+func (k keychain) deleteItem(name string) error {
 	cmd := exec.Command(securityBin, "delete-generic-password",
 		"-s", k.service, "-a", name)
 	var errb bytes.Buffer

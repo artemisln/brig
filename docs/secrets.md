@@ -272,13 +272,16 @@ there is nothing to import and the command exits non-zero. That is why these
 docs lead with `brig run claude-code`. Putting `import` first greets a
 fresh machine with a red exit code for a state that is perfectly normal.
 
-### The size ceiling is a real limit, and `codex` hits it
+### Large credential documents fit
 
-A stored value is capped at about 3KB (see [the size limit](#the-size-limit)).
-That is enough for every API key, every OAuth credential document and every
-ed25519 key. It is **not** enough for a credential document the size of
-`codex`'s `~/.codex/auth.json`, which carries two JWTs. It does not fit, and
-it cannot be delivered as a file today.
+A value has no ceiling near the keychain's. On macOS the keychain item holds
+a key and the value lives in an encrypted file, so a credential document of
+several kilobytes stores the same way a token does. That covers Claude Code's
+document once plugins add their MCP OAuth state to it, and `codex`'s
+`~/.codex/auth.json` with its two JWTs. See
+[Where a value lives](#where-a-value-lives) for the layout. The one limit
+left is the 64 KiB read cap below, which refuses a stream rather than a
+secret.
 
 ## Getting a value in
 
@@ -292,17 +295,16 @@ ghp_...` to type. It comes from stdin, or from a file:
 | `-f FILE` | the file's bytes, verbatim |
 | `-f -` | stdin, spelled out. Same stripping as above |
 
-Either source is capped at 4096 bytes. `create` and `update` read no more than
-that before the value ever reaches the store, and refuse a longer one:
+Either source is capped at 65536 bytes. `create` and `update` read no more
+than that before the value ever reaches the store, and refuse a longer one:
 
 ```console
 $ brig secret create x < /dev/zero
-brig: the value on stdin is over 4096 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one
+brig: the value on stdin is over 65536 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one
 ```
 
-That cap is where *reading* stops. What the store itself accepts is tighter,
-about 3KB once the name and provenance are folded in: see
-[the size limit](#the-size-limit).
+That cap is a refusal of streams, not a limit on secrets. No credential comes
+near it.
 
 **stdin strips exactly one trailing line ending, and `-f` does not**. The
 asymmetry is the one thing on this page most worth remembering, so here is
@@ -418,41 +420,52 @@ the `.` specifically, since a dot makes that reference ambiguous. A
 leading digit reads as a number rather than a name, and a leading dash reads
 as a flag wherever the name is typed.
 
-## The size limit
+## Where a value lives
 
-A value is capped at around 3KB, and it is deliberately not a round number.
+On macOS a secret is two things: a key in your login keychain, and the value
+in a file under Brig's state directory, encrypted with that key.
 
-Brig hands `security` the write command on a single line, and `security` reads
-one command into a 4096-byte buffer. The budget is the whole command rather
-than the value, so the name competes with the value it names. The name appears
-twice on that line, as the keychain account and in the item's label. And
-base64 spends four characters for every three bytes of value.
+The keychain item, under the service `sh.brig.secret` with the secret's name
+as the account, holds a random 32-byte key and nothing else. Every item is
+the same size. The value is at `~/.brig/secrets/<name>` (`BRIG_STATE_DIR`
+moves the directory), encrypted with AES-256-GCM under that key, with the
+secret's name bound in so a file moved under another name does not open. The
+directory is created `0700` and each file is `0600`. A write goes through a
+temp file and a rename, so a crash mid-write leaves the previous value whole.
+An `update` keeps the key and replaces the file, so the one step that changes
+the value is that rename.
 
-| name | longest value `create` takes | `update` |
-| --- | --- | --- |
-| `a` (1 character) | 3012 bytes | 3006 bytes |
-| `gh-token` (8 characters) | 3003 bytes | 2994 bytes |
-| `deploy-key` (10 characters) | 3000 bytes | 2991 bytes |
-| a 43-character name | 2949 bytes | 2943 bytes |
+Why two places: Brig writes the keychain through `security -i`, which reads
+one command into a 4096-byte buffer and shortens a longer line without
+saying so. With the value on that line, a secret over about 3KB could not be
+stored, and a credential document with plugin state or two JWTs is larger
+than that. A key never is.
 
-`update` is tighter because its command carries `-U` and an empty `-j` that
-clears the previous provenance. Base64's four-for-three then rounds that gap
-to six or nine bytes, depending on the name's length.
+What that means for the things you might do to your machine:
 
-Every API key and every SSH key you are likely to have fits: an ed25519
-private key is 387 bytes. A 4096-bit RSA private key does not, and is refused
-with both numbers named rather than stored short:
+- **A backup needs both halves.** A copy of `~/.brig` without the login
+  keychain holds ciphertext nothing can open. A copy of the keychain without
+  `~/.brig` holds keys to nothing. Time Machine copies both.
+- **Deleting is deleting both.** `brig secret delete` removes the item first,
+  then the file. Once the item is gone the file is unreadable, so a failure
+  between the two leaves nothing usable behind.
+- **What protects the value is what protected it before.** Anything that can
+  read the keychain item as you can read the key and the file. Anything that
+  cannot open the keychain gets ciphertext. [security.md](security.md#the-secret-store)
+  says what the keychain item's ACL does and does not stop.
 
-```console
-$ brig secret create deploy-key -f rsa4096.pem
-brig: the value for "deploy-key" is 3272 bytes, and with its provenance the keychain takes at most 3000
-```
+A secret stored by an older Brig holds its value in the keychain item itself.
+`read` returns it as before, and the next `update` or re-import moves it into
+the layout above. Nothing has to be migrated by hand.
 
-Brig also reads back what it just wrote and compares the bytes. A `create`
-that does not match is removed, since a caller told the write failed expects
-nothing to be there. An `update` that does not match cannot be undone the same
-way, since the previous value is already gone, so it only reports the
-mismatch.
+Brig also reads back what it just wrote and compares the bytes, which is the
+one check that both halves landed and agree. A `create` that does not match
+is removed, since a caller told the write failed expects nothing to be there.
+An `update` that does not match cannot be undone the same way, since the
+previous value is already gone, so it only reports the mismatch.
+
+Linux stores the value in the keyring item itself, because a Secret Service
+keyring has no such ceiling. The section below covers it.
 
 ## Linux
 
@@ -491,8 +504,9 @@ around having one.
 | `no value on stdin. Pipe one in, or pass -f <file>: …` (and prints two examples) | `create` at a prompt with nothing piped in. It refuses rather than waiting, because typing the value there puts it in your scrollback |
 | ``-f was given an empty path. Leave it out to read stdin, or pass `-f -` to say so`` | `-f "$KEYFILE"` with the variable unset. Falling through to stdin stores whatever the script had on it, under your name, and reports success |
 | `--stdin and -f name two different sources; pass one` | both given, and guessing which you meant silently stores the wrong one |
-| `the value on stdin is over 4096 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one` | `create` or `update` read more than 4096 bytes before ever reaching the store. `-f FILE` names the file in place of `stdin` |
-| `the value for "x" is N bytes, and with its provenance the keychain takes at most M` | over [the size limit](#the-size-limit) |
+| `the value on stdin is over 65536 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one` | `create` or `update` read more than 65536 bytes before ever reaching the store. `-f FILE` names the file in place of `stdin` |
+| `the key for "x" is in the keychain, but its value at <path> is missing. Store it again: …` | the file under `~/.brig/secrets` was removed and the keychain item was not. See [Where a value lives](#where-a-value-lives) |
+| `the value at <path> does not open with the key stored for "x", so one of them was changed outside brig. Store it again: …` | the file or the keychain item was replaced by something other than Brig. Storing the value again replaces both |
 | `deleting "x" cannot be undone, and there is no terminal to ask on. Pass -y to answer in advance: …` | a cron job or a unit file. `-y` is the answer given ahead |
 | `a secret name holds letters, digits, - and _, ...` | see [Naming a secret](#naming-a-secret) |
 | `no secret store on this platform: … no Secret Service answers on it …` | Linux with no keyring on the D-Bus session bus. Install `gnome-keyring` or KWallet and log in to a desktop session that starts it |
@@ -500,6 +514,5 @@ around having one.
 | `"x" is a secret, not a profile, and import takes the profile that declares it: …` | `import`'s first argument is a profile. The message names the one that declares the secret you typed |
 | `nothing to import for "x": … held no value` | the profile's sources exist and none of them had anything. Usually: run the agent on the host once to log in |
 | `"x" is already stored and brig did not put it there, so importing would replace a value you supplied` | you created it by hand. `-y` if replacing it is what you meant |
-| `the value for "x" is N bytes and the store takes at most M, so nothing was written` | over [the size limit](#the-size-limit), checked before the write so a re-import cannot destroy a good value |
 | `--from-command fills one secret, so it needs one name` | it supplies a value, and nothing in the command says which secret it is for |
 | `the imported credential x (y) expired N ago.`, followed by `Renew it on the host, then: brig secret import y` | a run found a stored, imported credential past its `expiryField:`. Log in on the host again and re-import |

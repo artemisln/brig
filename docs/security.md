@@ -281,9 +281,10 @@ brig secret ls
 
 What that means for the things this document is about:
 
-- **The value never appears in argv.** The whole `add-generic-password`
-  command, base64 value and all, goes to `security -i` down a pipe. Brig's
-  own command line is `security -i` and nothing else. This is the same
+- **The value never appears in argv, and never reaches `security` at all.**
+  The keychain item holds a 32-byte key, not the value (see below). The whole
+  `add-generic-password` command, base64 key and all, goes to `security -i`
+  down a pipe. Brig's own command line is `security -i` and nothing else. This is the same
   guarantee the forwarding path makes above, for the same reason. `security -i`
   reads one command per line and blocks for the next. So the write is on the
   process table only for as long as the pipe stays open. Reproduce it by
@@ -300,24 +301,23 @@ What that means for the things this document is about:
   Brig does not ask for the broad `-A`, but it does not narrow the
   default either. This is the same fact [file delivery](#what-file-delivery-buys-and-what-it-costs)
   states for the Claude credential copy specifically.
-- **Values are base64-encoded.** `security -i` reads one command per line, so a
-  raw newline in a value ends the command early. Everything after it
-  reads as a *second command*. Encoding removes that, and with it the
-  need to quote anything. base64 spells everything in letters, digits, `+`, `/`
-  and `=`, so no `"` and no `\` ever reaches the line. It also makes the NUL
-  byte and the non-UTF8 byte ordinary, which is what lets an SSH key or a
-  binary value round-trip at all. The visible cost is that Keychain Access, and
-  `security find-generic-password -w` by hand, show base64 rather than the
-  secret. It is encoding, not encryption, and protects nothing on its own.
-  The keychain does that.
-- **A value has a size ceiling, and Brig refuses rather than stores short.**
-  That 4096-byte line is the budget for the *whole* command. A longer name
-  leaves fewer bytes for the value it names, about 3KB of raw value in
-  practice. Every API key and SSH key fits. A 4096-bit RSA private key does
-  not. Brig checks the length up front and reads back what it wrote. Rather
-  than fail outright, `security` answers a line it cannot fit by shortening
-  it and reporting success. See [secrets.md](secrets.md#the-size-limit) for
-  the numbers.
+- **The keychain holds the key. The value is an encrypted file.** The item
+  under `sh.brig.secret` is a random 32-byte key, base64-encoded so that
+  nothing on the `security -i` line needs quoting. The value is at
+  `~/.brig/secrets/<name>`, `0600` in a `0700` directory, encrypted with
+  AES-256-GCM under that key with the secret's name as associated data.
+  [secrets.md](secrets.md#where-a-value-lives) has the layout and why it
+  exists: `security -i` shortens a line over 4096 bytes without saying so,
+  and a credential document does not fit on one. What this changes for the
+  threat model is nothing, and what it adds is one fact. A process that can
+  read the item, which is any process running as you (the ACL point below),
+  reads the key and opens the file. A copy of the disk without the login
+  keychain holds ciphertext it cannot open. The new fact is that the two
+  halves can travel separately: a backup or a synced `~/.brig` carries
+  ciphertext, and only the keychain carries what opens it. The file's size
+  is roughly the value's, and its mtime is the last rotation. Keychain Access
+  shows a base64 key, not the secret. The envelope is not the per-application
+  ACL the next bullet says the item lacks. It does not narrow who can read.
 - **`brig secret ls` never decrypts.** It reads attributes only, which is why
   listing raises no access prompt and why it can show names and dates but
   never values. Worth being exact about what it reads, though:
