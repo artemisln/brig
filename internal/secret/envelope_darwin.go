@@ -78,30 +78,32 @@ func stateDir() (string, error) {
 	return filepath.Join(home, ".brig"), nil
 }
 
-// secretsDir is the directory the value files live in, created 0700 on
-// first use.
-func secretsDir() (string, error) {
-	base, err := stateDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(base, secretsDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("cannot create %s: %w", dir, err)
-	}
-	return dir, nil
-}
-
-// openSecretsRoot opens the directory as an os.Root, so every file operation
-// below is confined to it. The names are already safe; the root is what
-// makes a symlink planted at one of them a refusal rather than a write
-// somewhere else.
+// openSecretsRoot opens the secrets directory as an os.Root, creating it
+// 0700 on first use, so every file operation below is confined to it.
+//
+// The directory is reached through a root on the state directory rather than
+// by path, so a symlink planted at <state>/secrets is refused rather than
+// followed. The names inside are already safe; the root is what makes a
+// symlink planted at one of them a refusal rather than a write somewhere
+// else.
 func openSecretsRoot() (*os.Root, string, error) {
-	dir, err := secretsDir()
+	base, err := stateDir()
 	if err != nil {
 		return nil, "", err
 	}
-	root, err := os.OpenRoot(dir)
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return nil, "", fmt.Errorf("cannot create %s: %w", base, err)
+	}
+	state, err := os.OpenRoot(base)
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot open %s: %w", base, err)
+	}
+	defer func() { _ = state.Close() }()
+	dir := filepath.Join(base, secretsDirName)
+	if err := state.Mkdir(secretsDirName, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, "", fmt.Errorf("cannot create %s: %w", dir, err)
+	}
+	root, err := state.OpenRoot(secretsDirName)
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot open %s: %w", dir, err)
 	}
@@ -181,10 +183,36 @@ func unseal(name string, key, blob []byte) ([]byte, error) {
 	return gcm.Open(nil, rest[:nonceLen], rest[nonceLen:], []byte(name))
 }
 
+// tempSuffix ends every temp file's name, so removeValueFile can tell one
+// left behind from a value.
+const tempSuffix = ".tmp"
+
+// createTemp opens a temp file of this secret's own next to its value: the
+// name is unpredictable and O_EXCL fails on anything already at it, so two
+// writers of one secret never share a file, and nothing can be waiting where
+// this lands. Same shape as the workspace's createTemp.
+func createTemp(root *os.Root, name string) (*os.File, string, error) {
+	for range 10000 {
+		var suffix [4]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return nil, "", err
+		}
+		tmp := fmt.Sprintf("%s.%x%s", name, suffix, tempSuffix)
+		f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, tmp, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", errors.New("cannot find a free name for a temporary file")
+}
+
 // writeValueFile puts blob at name inside the secrets directory, through a
-// temp file and a rename, so a crash mid-write leaves the old value whole
-// and never a half-written new one. The file is 0600 from the moment it
-// exists.
+// temp file and a rename, so a write cut short leaves the old value whole
+// and never a half-written new one, and two writers of one name each land
+// whole, last rename wins. The file is 0600 from the moment it exists.
 func writeValueFile(name string, blob []byte) (path string, err error) {
 	root, dir, err := openSecretsRoot()
 	if err != nil {
@@ -192,22 +220,22 @@ func writeValueFile(name string, blob []byte) (path string, err error) {
 	}
 	defer func() { _ = root.Close() }()
 	path = filepath.Join(dir, name)
-	tmp := name + ".tmp"
-	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, tmp, err := createTemp(root, name)
 	if err != nil {
 		return path, fmt.Errorf("cannot write %s: %w", path, err)
 	}
+	// Removed on every path but the rename that consumes it. A rename that
+	// succeeded leaves nothing at tmp, and Remove's ErrNotExist is nothing
+	// to report.
+	defer func() { _ = root.Remove(tmp) }()
 	if _, err := f.Write(blob); err != nil {
 		_ = f.Close()
-		_ = root.Remove(tmp)
 		return path, fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
-		_ = root.Remove(tmp)
 		return path, fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	if err := root.Rename(tmp, name); err != nil {
-		_ = root.Remove(tmp)
 		return path, fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	return path, nil
@@ -232,7 +260,8 @@ func readValueFile(name string) (blob []byte, path string, err error) {
 	return blob, path, nil
 }
 
-// removeValueFile removes the file at name, treating an absent one as done.
+// removeValueFile removes the file at name, treating an absent one as done,
+// and sweeps any temp file a write of this secret left behind.
 func removeValueFile(name string) error {
 	root, dir, err := openSecretsRoot()
 	if err != nil {
@@ -241,6 +270,23 @@ func removeValueFile(name string) error {
 	defer func() { _ = root.Close() }()
 	if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("cannot remove %s: %w", filepath.Join(dir, name), err)
+	}
+	d, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", dir, err)
+	}
+	entries, err := d.ReadDir(-1)
+	_ = d.Close()
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if strings.HasPrefix(n, name+".") && strings.HasSuffix(n, tempSuffix) {
+			if err := root.Remove(n); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("cannot remove %s: %w", filepath.Join(dir, n), err)
+			}
+		}
 	}
 	return nil
 }

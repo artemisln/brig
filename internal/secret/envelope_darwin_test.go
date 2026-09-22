@@ -327,3 +327,135 @@ func TestKeyLineNeverNearsTheBuffer(t *testing.T) {
 		t.Errorf("the longest key line is %d bytes, too close to the %d-byte buffer", line, maxLine)
 	}
 }
+
+// Two writers of one secret must not share a temp file. A fixed
+// `<name>.tmp` opened without O_EXCL let a second writer truncate the first
+// one's bytes from under it, and the file renamed into place then held one
+// writer's nonce over the other's ciphertext: a secret nothing could open.
+// The write has to land in a file only it can name, so a file already at the
+// fixed spelling, unreadable and unwritable, is no obstacle.
+func TestWriteDoesNotShareATempFileWithAnotherWriter(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes through a 0000 file")
+	}
+	k := testStore(t)
+	dir := filepath.Dir(valuePath(t, "shared"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.tmp"), []byte("someone else's"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Create("shared", []byte("mine")); err != nil {
+		t.Fatalf("Create shared the fixed temp path with another writer: %v", err)
+	}
+	got, err := k.Read("shared")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != "mine" {
+		t.Errorf("read back %q", got)
+	}
+}
+
+// Sixteen concurrent updates of one secret end with a secret that opens and
+// holds one of the values written. Not a proof, but a write that shared a
+// temp file fails it often, and one that does not never does. An individual
+// update is allowed to fail: security's own -U reports a duplicate when two
+// of them collide, and that is the keychain's behaviour, not this package's.
+func TestConcurrentUpdatesLeaveAReadableSecret(t *testing.T) {
+	k := testStore(t)
+	if err := k.Create("busy", []byte("v0")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	const n = 16
+	errs := make(chan error, n)
+	for i := range n {
+		go func() {
+			errs <- k.keychain.Update("busy", bytes.Repeat([]byte{'a' + byte(i)}, 4096))
+		}()
+	}
+	for range n {
+		<-errs
+	}
+	got, err := k.Read("busy")
+	if err != nil {
+		t.Fatalf("after concurrent updates, Read: %v", err)
+	}
+	if len(got) != 4096 || strings.Trim(string(got), string(got[0])) != "" {
+		t.Errorf("read back a value no writer wrote: %d bytes", len(got))
+	}
+}
+
+// A temp file left by a write cut short is swept by Delete along with the
+// value, so a failed write does not litter the directory for good.
+func TestDeleteSweepsLeftoverTempFiles(t *testing.T) {
+	k := testStore(t)
+	if err := k.Create("littered", []byte("v")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dir := filepath.Dir(valuePath(t, "littered"))
+	for _, leftover := range []string{"littered.0badc0de.tmp", "littered.deadbeef.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, leftover), []byte("half"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A neighbour's temp file is not this secret's to sweep.
+	if err := os.WriteFile(filepath.Join(dir, "littered-two.0badc0de.tmp"), []byte("half"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Delete("littered"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "littered-two.0badc0de.tmp" {
+		t.Errorf("after Delete the directory holds %v, want only the neighbour's temp file", names)
+	}
+}
+
+// A file that is not in brig's format at all is named as such, rather than
+// reported as a value that was changed. The advice differs: nothing brig
+// wrote is there to update.
+func TestReadNamesAFileThatIsNotAValueFile(t *testing.T) {
+	k := testStore(t)
+	if err := k.Create("notours", []byte("v")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := os.WriteFile(valuePath(t, "notours"), []byte("just some file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := k.Read("notours")
+	if err == nil {
+		t.Fatal("Read succeeded on a file that is not a value file")
+	}
+	if !strings.Contains(err.Error(), "not a brig value file") {
+		t.Errorf("error = %v, want it to say the file is not a brig value file", err)
+	}
+}
+
+// The secrets directory is reached through a root on the state directory, so
+// a symlink planted at <state>/secrets is refused rather than followed.
+func TestASymlinkAtTheSecretsDirectoryIsRefused(t *testing.T) {
+	k := testStore(t)
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(os.Getenv("BRIG_STATE_DIR"), "secrets")); err != nil {
+		t.Fatal(err)
+	}
+	err := k.Create("planted", []byte("v"))
+	if err == nil {
+		t.Fatal("Create followed a symlink at the secrets directory")
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("the write landed through the symlink: %d entries", len(entries))
+	}
+	if _, err := k.Read("planted"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the refused create left a key behind: %v", err)
+	}
+}
