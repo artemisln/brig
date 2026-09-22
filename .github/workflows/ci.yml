@@ -12,6 +12,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # labeled and unlabeled on top of the defaults: the tests-kept job reads
+    # the removes-tests label out of the event payload, so a label added
+    # after the pull request opened has to start a run that can see it.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
