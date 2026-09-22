@@ -559,7 +559,7 @@ Brig's own flag but stood where the agent's arguments already begin.
 | `--cpus N` | number | the agent's own (`4` for most shipped agents) | guest vCPUs |
 | `--no-project` | (none) | off | mount no project this run, even one this session ran with before. On any verb but `run`, refused by name as a usage error |
 | `-d`, `--detach` | (none) | off | start the sandbox and exit, without attaching. Parses on every verb, but only `run` reads it. On `sh`, `stop`, `rm` and `info` it is silently inert |
-| `--skills` | (none) | off | copy your own `~/.claude` skills and plugins into the guest home. The host copy is never written. Same as `BRIG_SKILLS=1` |
+| `--skills` | (none) | off | copy your own `~/.claude` skills and plugins into the guest home. The host copy is never written. Same as `BRIG_SKILLS=1`. Only an agent whose profile declares `hostConfigDir` and `projectPaths` has anywhere to copy from, which is `claude-code` among the shipped ones; asking for it anywhere else warns that nothing was seeded, and so does asking for it with those directories absent or empty |
 | `--network MODE` | `shared`, `isolated` or `offline` | `shared`, unless the agent's own profile sets `network:` (none of the shipped agents do) | the sandbox's network posture. See [policies.md](policies.md) |
 | `--offline` | (none) | off | shorthand for `--network offline`: the agent runs with its guest home, and nothing leaves the sandbox |
 
@@ -741,7 +741,7 @@ only" below.
 | `BRIG_CPUS` | the agent's own | guest vCPUs |
 | `BRIG_READY_TIMEOUT` | `30` | seconds to wait for the in-guest agent once the runtime reports the sandbox running. The two are not the same moment |
 | `BRIG_NETWORK` | `shared` | `shared`, `isolated` or `offline`. An unrecognized value refuses the run. See [policies.md](policies.md) |
-| `BRIG_SKILLS` | `0` | `1` copies your own `~/.claude` skills and plugins into the guest home. Same as `--skills` |
+| `BRIG_SKILLS` | `0` | `1` copies your own `~/.claude` skills and plugins into the guest home. Same as `--skills`, including the warning when there is nothing to seed |
 | `BRIG_FORWARD_ENV` | (unset) | a space-separated list of environment variable names to carry into the guest, read live on every run |
 | `BRIG_TITLE` | the agent's own | window title for a graphical agent |
 

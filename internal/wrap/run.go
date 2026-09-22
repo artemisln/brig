@@ -31,7 +31,6 @@ func (c *Config) BuildEnv() (creds.Set, error) {
 	for _, w := range c.slugMigration {
 		c.warnf("%s", w)
 	}
-
 	// Resolved before anything else touches the sandbox, and returned as an
 	// error rather than a warning: a run whose secret cannot be resolved must
 	// fail, saying which secret is missing and how to create it, instead of
@@ -143,6 +142,13 @@ func (c *Config) EnsureRunning(set creds.Set) error {
 	// line. The set is the whole of what the runtime will be handed: the git
 	// plumbing and SetupGit have both added to it.
 	c.warnArgvExposure(set)
+	// Beside it: the copy happens in PrepareWorkspace below, so this is where
+	// a request that copies nothing is answered, and brig info previews the
+	// envelope without reaching here. A warning rather than an alert, since
+	// alertf is verification's alone.
+	if c.skillsNotice != "" {
+		c.warnf("%s", c.skillsNotice)
+	}
 	if err := c.PrepareWorkspace(); err != nil {
 		return err
 	}
