@@ -274,11 +274,15 @@ fresh machine with a red exit code for a state that is perfectly normal.
 
 ### The size ceiling is a real limit, and `codex` hits it
 
-A stored value is capped at about 3KB (see [the size limit](#the-size-limit)).
-That is enough for every API key, every OAuth credential document and every
-ed25519 key. It is **not** enough for a credential document the size of
-`codex`'s `~/.codex/auth.json`, which carries two JWTs. It does not fit, and
-it cannot be delivered as a file today.
+With the `security` store, a stored value is capped at about 3KB (see
+[the size limit](#the-size-limit)). That is enough for every API key, every
+OAuth credential document and every ed25519 key. It is **not** enough for a
+credential document the size of `codex`'s `~/.codex/auth.json`, which
+carries two JWTs. A signed Brig stores through Security.framework instead,
+where a value has no ceiling near the keychain's, so that document fits
+there: see [Two ways into the keychain](#two-ways-into-the-keychain). The
+one limit left on that path is the 64 KiB read cap below, which refuses a
+stream rather than a secret.
 
 ## Getting a value in
 
@@ -292,17 +296,17 @@ ghp_...` to type. It comes from stdin, or from a file:
 | `-f FILE` | the file's bytes, verbatim |
 | `-f -` | stdin, spelled out. Same stripping as above |
 
-Either source is capped at 4096 bytes. `create` and `update` read no more than
-that before the value ever reaches the store, and refuse a longer one:
+Either source is capped at 65536 bytes. `create` and `update` read no more
+than that before the value ever reaches the store, and refuse a longer one:
 
 ```console
 $ brig secret create x < /dev/zero
-brig: the value on stdin is over 4096 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one
+brig: the value on stdin is over 65536 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one
 ```
 
-That cap is where *reading* stops. What the store itself accepts is tighter,
-about 3KB once the name and provenance are folded in: see
-[the size limit](#the-size-limit).
+That cap is where *reading* stops. What the `security` store itself accepts
+is tighter, about 3KB once the name and provenance are folded in: see
+[the size limit](#the-size-limit). The native store takes the whole value.
 
 **stdin strips exactly one trailing line ending, and `-f` does not**. The
 asymmetry is the one thing on this page most worth remembering, so here is
@@ -418,7 +422,52 @@ the `.` specifically, since a dot makes that reference ambiguous. A
 leading digit reads as a number rather than a name, and a leading dash reads
 as a flag wherever the name is typed.
 
+## Two ways into the keychain
+
+On macOS Brig reaches your login keychain one of two ways, and picks by
+looking at its own code signature.
+
+A release build is signed with a Developer ID. It calls Security.framework
+directly, and the item it writes holds the value as bytes, with an ACL that
+names Brig and `brigd`, when the daemon is installed beside it. There is no
+size ceiling, no encoding, no file on disk, and no other application reads
+the item without a dialog. A locked keychain is reported as locked, with
+the unlock command, rather than mistaken for an item Brig cannot open. `brig doctor` reports it
+as `keychain (native) reachable`.
+
+A build you made with `go build` is ad-hoc signed. To the keychain every
+rebuild of it is a different application, so an item one build wrote would
+prompt the next. Such a build writes through `security` instead, the way
+every Brig before this did, and the layout below is what it uses. `brig
+doctor` reports it as `keychain reachable`. Sign a local build to use the
+native store: [CONTRIBUTING.md](../CONTRIBUTING.md#build-and-test-locally)
+says how.
+
+`BRIG_KEYCHAIN=native` or `BRIG_KEYCHAIN=security` overrides the choice, and
+any other value is refused by name.
+
+The two stores share one namespace and read each other's items, so nothing
+is migrated by hand. The native store cannot decrypt an item `security`
+wrote, because that item's ACL trusts `security` and not Brig. Rather than
+raise a dialog, it reads such an item through `security`, and moves it on
+the next write: `brig secret update`, or a re-import, reads the old value
+through `security`, removes the item through `security`, and writes a
+native item in its place. If the native write fails, the old item is put
+back. `brig secret ls` reads attributes only, so it lists both kinds without
+a dialog either way.
+
+The other direction is narrower. A `security` build lists an item the
+native store wrote, and can delete it, but cannot read it: `security` is
+not on that item's ACL, and asking would put a keychain dialog up. Brig
+checks the item's attributes first and refuses with the reason instead. A
+release build never needs that direction. A local build that does can be
+signed, or run with `BRIG_KEYCHAIN=native` if it is.
+
 ## The size limit
+
+This section is about the `security` store: an ad-hoc signed build, or
+`BRIG_KEYCHAIN=security`. The native store holds the value in the item
+itself and has no ceiling near this one.
 
 A value is capped at around 3KB, and it is deliberately not a round number.
 
@@ -491,7 +540,7 @@ around having one.
 | `no value on stdin. Pipe one in, or pass -f <file>: …` (and prints two examples) | `create` at a prompt with nothing piped in. It refuses rather than waiting, because typing the value there puts it in your scrollback |
 | ``-f was given an empty path. Leave it out to read stdin, or pass `-f -` to say so`` | `-f "$KEYFILE"` with the variable unset. Falling through to stdin stores whatever the script had on it, under your name, and reports success |
 | `--stdin and -f name two different sources; pass one` | both given, and guessing which you meant silently stores the wrong one |
-| `the value on stdin is over 4096 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one` | `create` or `update` read more than 4096 bytes before ever reaching the store. `-f FILE` names the file in place of `stdin` |
+| `the value on stdin is over 65536 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one` | `create` or `update` read more than 65536 bytes before ever reaching the store. `-f FILE` names the file in place of `stdin` |
 | `the value for "x" is N bytes, and with its provenance the keychain takes at most M` | over [the size limit](#the-size-limit) |
 | `deleting "x" cannot be undone, and there is no terminal to ask on. Pass -y to answer in advance: …` | a cron job or a unit file. `-y` is the answer given ahead |
 | `a secret name holds letters, digits, - and _, ...` | see [Naming a secret](#naming-a-secret) |

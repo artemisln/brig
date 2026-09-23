@@ -292,14 +292,26 @@ What that means for the things this document is about:
   `ps -Ao args` while it sits there. The argv shows `security -i` and nothing
   more. `security find-generic-password` afterwards confirms the value
   really was stored. Closing the fifo and deleting the probe item cleans up.
-- **The item's ACL is the default one.** `security` created these items, so
-  `security` is trusted to read them back, with no keychain dialog. The
-  consequence is the part worth being clear about: **anything that can run
-  `/usr/bin/security` as you can read them back too.** That is the same
-  boundary as your own shell, and it is weaker than a per-application ACL.
-  Brig does not ask for the broad `-A`, but it does not narrow the
-  default either. This is the same fact [file delivery](#what-file-delivery-buys-and-what-it-costs)
-  states for the Claude credential copy specifically.
+- **Which application the item's ACL trusts depends on which store wrote
+  it.** A release build, signed with a Developer ID, writes through
+  Security.framework, and the item's ACL names Brig and `brigd`, the daemon
+  that resolves secrets for a run when it is installed beside Brig: both
+  read it back with no dialog, and any other application asking for it
+  gets one. A rebuild
+  keeps that access, because the requirement the ACL records is the
+  identifier and the team, not the binary's hash. An ad-hoc signed build,
+  which is what a plain `go build` produces, writes through `security`
+  instead, and the item's ACL trusts `security`. The consequence is the part
+  worth being clear about for that store: **anything that can run
+  `/usr/bin/security` as you can read those items back too.** That is the
+  same boundary as your own shell, and it is weaker than the per-application
+  ACL the native store gives. Brig never raises a keychain dialog on either
+  path: the native store turns interaction off for the process, so an item
+  it is not trusted for fails with a status code and is read through
+  `security`, the way it was written. [secrets.md](secrets.md#two-ways-into-the-keychain)
+  says how one store's items move to the other. This is the same fact
+  [file delivery](#what-file-delivery-buys-and-what-it-costs) states for the
+  Claude credential copy specifically.
 - **Values are base64-encoded.** `security -i` reads one command per line, so a
   raw newline in a value ends the command early. Everything after it
   reads as a *second command*. Encoding removes that, and with it the
@@ -310,7 +322,7 @@ What that means for the things this document is about:
   `security find-generic-password -w` by hand, show base64 rather than the
   secret. It is encoding, not encryption, and protects nothing on its own.
   The keychain does that.
-- **A value has a size ceiling, and Brig refuses rather than stores short.**
+- **With the `security` store a value has a size ceiling, and Brig refuses rather than stores short.**
   That 4096-byte line is the budget for the *whole* command. A longer name
   leaves fewer bytes for the value it names, about 3KB of raw value in
   practice. Every API key and SSH key fits. A 4096-bit RSA private key does
