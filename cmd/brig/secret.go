@@ -554,18 +554,11 @@ func readValue(file string) ([]byte, error) {
 	return value, nil
 }
 
-// maxValueBytes is where reading a secret stops.
-//
-// The store this feeds takes less: the keychain command line is one 4096-byte
-// line, the value travels base64-encoded, and what is left after the command
-// and the name is about 3 KB. So a value over this ceiling was never going to
-// be stored, and reading it first is not free -- `brig secret create x`
-// pointed at /dev/zero read until it had 12.5 GB in memory, three seconds in,
-// on its way to being refused for being 3 KB too long. The cap is a little
-// above what the store accepts so the error that comes back is the store's
-// own, about this secret and this name, in every case except the one where
-// there is no plausible secret at the other end at all.
-const maxValueBytes = 4096
+// maxValueBytes caps how much of a secret's source is read, so a stream such
+// as /dev/zero is refused instead of read into memory. 64 KiB is well above
+// any credential and well below ARG_MAX, which limits the keychain's argv
+// write path to about 750 KB.
+const maxValueBytes = 64 << 10
 
 // readCapped reads a secret and refuses one that does not end.
 func readCapped(r io.Reader, what string) ([]byte, error) {

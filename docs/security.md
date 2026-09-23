@@ -310,14 +310,13 @@ What that means for the things this document is about:
   `security find-generic-password -w` by hand, show base64 rather than the
   secret. It is encoding, not encryption, and protects nothing on its own.
   The keychain does that.
-- **A value has a size ceiling, and Brig refuses rather than stores short.**
-  That 4096-byte line is the budget for the *whole* command. A longer name
-  leaves fewer bytes for the value it names, about 3KB of raw value in
-  practice. Every API key and SSH key fits. A 4096-bit RSA private key does
-  not. Brig checks the length up front and reads back what it wrote. Rather
-  than fail outright, `security` answers a line it cannot fit by shortening
-  it and reporting success. See [secrets.md](secrets.md#the-size-limit) for
-  the numbers.
+- **A value too big for the line is written through argv.** The 4096-byte
+  line holds the whole command, about 3KB of raw value. `security` truncates
+  a longer line without an error, so a larger value is passed as an argument.
+  While `security` runs, the base64 value is visible to `ps` for your user
+  and root, and to exec auditing such as an EDR agent. Reads and sandbox
+  delivery never use argv. Brig reads back every write. See
+  [secrets.md](secrets.md#the-size-limit).
 - **`brig secret ls` never decrypts.** It reads attributes only, which is why
   listing raises no access prompt and why it can show names and dates but
   never values. Worth being exact about what it reads, though:

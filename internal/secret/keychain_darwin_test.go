@@ -193,78 +193,143 @@ func rsaKeyPEM(t *testing.T) []byte {
 	})
 }
 
-// The value must never reach argv, where `ps` would show it to any process on
-// the host. internal/runtime makes the same guarantee for guest variables, and
-// this is the line that keeps the store honest about it: the command carries
-// no value at all, and the value travels on stdin.
+// A value that fits the interactive line stays out of argv.
 func TestWriteKeepsTheValueOutOfArgv(t *testing.T) {
 	k := testStore(t)
 	const value = "argv-canary-value"
 	if err := k.Create("canary", []byte(value)); err != nil {
 		t.Fatal(err)
 	}
-	prefix, err := k.writePrefix("canary", false, Provenance{})
+	args, err := k.writeArgs("canary", false, Provenance{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The whole of what security is invoked with. Anything the value could
-	// hide in would have to be here.
-	for _, a := range []string{"-i", prefix} {
-		if strings.Contains(a, value) || strings.Contains(a, base64.StdEncoding.EncodeToString([]byte(value))) {
+	encoded := base64.StdEncoding.EncodeToString([]byte(value))
+	if line := interactiveLine(args, encoded); len(line) >= maxLine {
+		t.Fatalf("a %d-byte value does not fit the interactive line, so it went to argv", len(value))
+	}
+	for _, a := range append([]string{"-i"}, args...) {
+		if strings.Contains(a, value) || strings.Contains(a, encoded) {
 			t.Fatalf("the value reached argv: %q", a)
 		}
 	}
-	if !strings.HasSuffix(prefix, "-w ") {
-		t.Errorf("-w is not last, so security would not read the value: %q", prefix)
+	if args[len(args)-1] != "-w" {
+		t.Errorf("-w is not last, so the value would not follow it: %q", args)
 	}
 }
 
-// The write is priced against the command line that carries it, and a value
-// that does not fit is refused rather than shortened. security answers a line
-// over its buffer by truncating it and reporting success, so a value one byte
-// past the limit used to be stored short, decode cleanly, and read back as a
-// different secret than the one that went in.
-func TestWriteRefusesAValueTooBigForTheCommandLine(t *testing.T) {
+// Values on both sides of the stdin/argv switch round-trip whole. An
+// off-by-one there would truncate silently.
+func TestWriteRoundTripsAcrossTheLineBoundary(t *testing.T) {
 	k := testStore(t)
-	max := k.MaxValueFor("big", false, Provenance{})
-	if max < 1024 {
-		t.Fatalf("MaxValueFor = %d, too small to be carrying keys", max)
+	for _, update := range []bool{false, true} {
+		name := fmt.Sprintf("edge-%t", update)
+		args, err := k.writeArgs(name, update, Provenance{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fits := (maxLine - 1 - len(interactiveLine(args, ""))) / 4 * 3
+		if update {
+			if err := k.Create(name, []byte("seed")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for n := fits - 1; n <= fits+4; n++ {
+			value := bytes.Repeat([]byte("a"), n)
+			if err := k.Write(name, value, Provenance{}, update); err != nil {
+				t.Fatalf("update=%v, %d bytes: %v", update, n, err)
+			}
+			got, err := k.Read(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != n {
+				t.Errorf("update=%v: %d bytes read back as %d", update, n, len(got))
+			}
+			if !update {
+				_ = k.Delete(name)
+			}
+		}
 	}
-	if err := k.Create("big", bytes.Repeat([]byte("a"), max)); err != nil {
-		t.Fatalf("a value of exactly %d bytes was refused: %v", max, err)
+}
+
+// A value too long for the interactive line is written through argv.
+func TestWriteStoresAValueTooBigForTheInteractiveLine(t *testing.T) {
+	k := testStore(t)
+	for _, n := range []int{5000, 60000} {
+		name := fmt.Sprintf("big-%d", n)
+		value := randomBytes(t, n)
+		if err := k.Create(name, value); err != nil {
+			t.Fatalf("%d bytes: %v", n, err)
+		}
+		got, err := k.Read(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, value) {
+			t.Errorf("%d bytes read back as %d, and not the same bytes", n, len(got))
+		}
+		// Quotes from the interactive line must not leak into argv.
+		attrs := attributes(t, k, name)
+		for _, want := range []string{
+			`0x00000007 <blob>="brig: ` + name + `"`,
+			`"desc"<blob>="brig secret"`,
+		} {
+			if !strings.Contains(attrs, want) {
+				t.Errorf("%d bytes: attributes lack %s:\n%s", n, want, attrs)
+			}
+		}
 	}
-	got, err := k.Read("big")
+}
+
+// Provenance survives large creates and updates.
+func TestLargeWriteKeepsItsProvenance(t *testing.T) {
+	k := testStore(t)
+	first := Provenance{V: ProvenanceVersion, From: "keychain:Claude Code-credentials", ExpiresAt: 1755436980000}
+	if err := k.Write("big-prov", randomBytes(t, 8000), first, false); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got := find(t, k, "big-prov").Provenance; got != first {
+		t.Errorf("provenance after create = %+v, want %+v", got, first)
+	}
+	second := Provenance{V: ProvenanceVersion, From: "keychain:Claude Code-credentials", ExpiresAt: 42}
+	value := randomBytes(t, 9000)
+	if err := k.Write("big-prov", value, second, true); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := find(t, k, "big-prov").Provenance; got != second {
+		t.Errorf("provenance after update = %+v, want %+v", got, second)
+	}
+	if got, err := k.Read("big-prov"); err != nil || !bytes.Equal(got, value) {
+		t.Errorf("value after update: %d bytes, %v; want the %d written", len(got), err, len(value))
+	}
+}
+
+// A large update without provenance clears the comment.
+func TestLargeUpdateWithNoProvenanceClearsTheOldOne(t *testing.T) {
+	k := testStore(t)
+	stale := Provenance{V: ProvenanceVersion, From: "keychain:svc", ExpiresAt: 1}
+	if err := k.Write("big-plain", randomBytes(t, 8000), stale, false); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := k.Update("big-plain", randomBytes(t, 8000)); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if attrs := attributes(t, k, "big-plain"); !strings.Contains(attrs, `"icmt"<blob>=<NULL>`) {
+		t.Errorf("the comment was not cleared:\n%s", attrs)
+	}
+}
+
+// attributes returns security's attribute output for one item, without the
+// value.
+func attributes(t *testing.T, k *testKeychain, name string) string {
+	t.Helper()
+	out, err := exec.Command(securityBin, "find-generic-password",
+		"-s", k.service, "-a", name).CombinedOutput()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("find-generic-password %s: %v\n%s", name, err, out)
 	}
-	if len(got) != max {
-		t.Errorf("the largest value read back as %d bytes, not %d", len(got), max)
-	}
-	err = k.Create("toobig", bytes.Repeat([]byte("a"), max+1))
-	if err == nil {
-		t.Fatal("a value one byte over the limit was accepted")
-	}
-	if !strings.Contains(err.Error(), "at most") {
-		t.Errorf("refusal = %v, want it to say what the limit is", err)
-	}
-	// Refused before anything was written, so there is no short value left
-	// behind under that name.
-	if _, err := k.Read("toobig"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("the refused write left something behind: %v", err)
-	}
-}
-
-// The limit shrinks as the name grows, because the name is on the same line.
-func TestMaxValueLeavesRoomForTheName(t *testing.T) {
-	k := testStore(t)
-	short := k.MaxValueFor("a", false, Provenance{})
-	long := k.MaxValueFor(strings.Repeat("a", 41), false, Provenance{})
-	if long >= short {
-		t.Errorf("MaxValueFor did not fall with a longer name: %d then %d", short, long)
-	}
-	if diff := short - long; diff < 30 {
-		t.Errorf("a name 40 characters longer only cost %d bytes", diff)
-	}
+	return string(out)
 }
 
 // The comment attribute is read without decrypting, which is what lets
@@ -322,28 +387,6 @@ func TestUpdateWithNoProvenanceClearsTheOldOne(t *testing.T) {
 	}
 }
 
-// MaxValue promises a caller that has not chosen a provenance yet a ceiling
-// Write will not undercut, for any From up to assumedFromLen. ExpiresAt is
-// omitempty, so leaving it zero in the assumed provenance dropped it out of
-// the encoded document and broke that promise from about 105 characters on --
-// the caller was told a value fit and then refused.
-//
-// Past assumedFromLen no fixed assumption can hold, and the failure there is
-// a spurious refusal carrying Write's own accurate ceiling, never a truncated
-// write. That boundary is the thing worth pinning.
-func TestMaxValueIsNeverLargerThanWhatWriteApplies(t *testing.T) {
-	k := keychain{service: "sh.brig.test"}
-	for _, n := range []int{len("keychain:svc"), 105, assumedFromLen} {
-		real := Provenance{V: ProvenanceVersion, From: strings.Repeat("x", n), ExpiresAt: 1755436980000}
-		for _, update := range []bool{false, true} {
-			if got, want := k.MaxValueFor("n", update, real), k.MaxValue("n", update); got < want {
-				t.Errorf("From=%d update=%v: Write's ceiling %d is below MaxValue's %d",
-					n, update, got, want)
-			}
-		}
-	}
-}
-
 // A hand-created secret carries none, and that has to read as absent rather
 // than as an empty provenance that claims a source of "".
 func TestHandCreatedSecretHasNoProvenance(t *testing.T) {
@@ -353,48 +396,6 @@ func TestHandCreatedSecretHasNoProvenance(t *testing.T) {
 	}
 	if got := find(t, k, "plain").Provenance; !got.IsZero() {
 		t.Errorf("provenance = %+v, want the zero value", got)
-	}
-}
-
-// The size ceiling is priced against the whole command line, and the comment
-// now rides on it -- so MaxValue has to account for the comment or the
-// pre-check passes a write that security silently truncates.
-func TestMaxValueAccountsForTheComment(t *testing.T) {
-	k := keychain{service: "sh.brig.test"}
-	long := Provenance{V: ProvenanceVersion, From: "keychain:" + strings.Repeat("x", 200)}
-	if k.MaxValueFor("n", false, long) >= k.MaxValueFor("n", false, Provenance{}) {
-		t.Error("a longer comment did not reduce the value budget")
-	}
-}
-
-// Step 5c: the write path must price its ceiling against the provenance it is
-// actually attaching, not the provenance-free ceiling MaxValue offers a
-// caller that has not chosen one yet. Wiring Write to that number while still
-// appending -j <encoded> is the obvious minimal edit, and it is wrong: the
-// line exceeds security's buffer, security truncates it silently on a
-// four-byte boundary, the short value still base64-decodes and still
-// resolves, and verify cannot roll back an update. The assertion that matters
-// is on the stored bytes -- here, that nothing was stored at all -- not on
-// the error alone.
-func TestWriteRefusesWhenProvenanceOverflowsTheLine(t *testing.T) {
-	k := testStore(t)
-	// A value that exactly fills the provenance-free budget: the old
-	// maxValue would have waved this through.
-	bare := k.MaxValueFor("prov-big", false, Provenance{})
-	value := bytes.Repeat([]byte("a"), bare)
-	long := Provenance{V: ProvenanceVersion, From: "keychain:" + strings.Repeat("x", 200)}
-
-	err := k.Write("prov-big", value, long, false)
-	if err == nil {
-		t.Fatal("a value plus provenance that overflows the line was accepted")
-	}
-	if !strings.Contains(err.Error(), "at most") {
-		t.Errorf("refusal = %v, want it to say what the limit is", err)
-	}
-	// The point of 5c: nothing was silently truncated and stored under a name
-	// that now resolves to a value shorter than the one asked for.
-	if _, err := k.Read("prov-big"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("the refused write left something behind")
 	}
 }
 

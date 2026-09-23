@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -21,7 +22,7 @@ func TestCreateRefusesAValueThatDoesNotEnd(t *testing.T) {
 	if err == nil {
 		t.Fatal("a megabyte on stdin was accepted as a secret")
 	}
-	if !strings.Contains(err.Error(), "stdin") || !strings.Contains(err.Error(), "4096") {
+	if !strings.Contains(err.Error(), "stdin") || !strings.Contains(err.Error(), strconv.Itoa(maxValueBytes)) {
 		t.Errorf("the refusal does not say what it refused or where the ceiling is: %v", err)
 	}
 	if _, ok := f.items["gh"]; ok {
@@ -46,11 +47,10 @@ func TestCreateFromAFileIsCappedToo(t *testing.T) {
 	}
 }
 
-// A value at the ceiling still goes through: the cap is a refusal of streams,
-// not a new limit on secrets.
+// A value well above credential size is accepted.
 func TestCreateStillTakesAnOrdinarySizedSecret(t *testing.T) {
 	f := newFake(t)
-	value := strings.Repeat("k", 2048)
+	value := strings.Repeat("k", 32<<10)
 	pipeStdin(t, value)
 	if err := secretCmd(&bytes.Buffer{}, []string{"create", "gh"}); err != nil {
 		t.Fatalf("an ordinary secret was refused: %v", err)

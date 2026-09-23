@@ -185,17 +185,6 @@ func importOne(
 	if err != nil {
 		return err
 	}
-	// Before the write, not after it. security truncates an over-long line
-	// silently on a four-byte boundary, so the short value still base64-decodes
-	// and still resolves -- and verify explicitly cannot roll back an update.
-	// Checking here is what stops a re-import destroying a good value and
-	// leaving a resolvable bad one behind.
-	if sizer, ok := store.(secret.Sizer); ok {
-		if max := sizer.MaxValue(d.Name, exists); len(value) > max {
-			return fmt.Errorf("the value for %q is %d bytes and the store takes at most %d, "+
-				"so nothing was written", d.Name, len(value), max)
-		}
-	}
 	// A byte-identical value is skipped rather than rewritten: otherwise
 	// Modified comes to mean "an import last ran" rather than "the value last
 	// changed", and it is the freshness signal users read in `brig secret ls`.

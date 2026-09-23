@@ -77,17 +77,6 @@ type Annotator interface {
 	Write(name string, value []byte, p Provenance, update bool) error
 }
 
-// Sizer is a backend with a value-size ceiling worth checking before writing.
-//
-// The keychain has one, and it truncates silently on a four-byte boundary --
-// so a truncated value still base64-decodes and still resolves. Checking
-// before the write is what stops a re-import destroying a good value and
-// leaving a resolvable bad one behind, which is the failure verify cannot roll
-// back on an update.
-type Sizer interface {
-	MaxValue(name string, update bool) int
-}
-
 // Open returns the store for this host. The platform files supply open(),
 // which is the whole of the backend auto-detection: a host has one system
 // keyring, and brig uses it.

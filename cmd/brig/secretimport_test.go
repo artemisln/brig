@@ -14,20 +14,16 @@ import (
 	"github.com/brig-sh/brig/internal/secret"
 )
 
-// fakeAnnotator is a store that carries provenance and a size ceiling, which
-// is what the importer type-asserts for. calls records every write so that
+// fakeAnnotator is a store that carries provenance, which is what the
+// importer type-asserts for. calls records every write so that
 // "one Update, never delete-then-create" is an assertion rather than a hope.
 type fakeAnnotator struct {
 	*fakeStore
 	prov  map[string]secret.Provenance
-	max   int
 	calls []string
 }
 
-var (
-	_ secret.Annotator = (*fakeAnnotator)(nil)
-	_ secret.Sizer     = (*fakeAnnotator)(nil)
-)
+var _ secret.Annotator = (*fakeAnnotator)(nil)
 
 func newAnnotating(t *testing.T) *fakeAnnotator {
 	t.Helper()
@@ -36,7 +32,7 @@ func newAnnotating(t *testing.T) *fakeAnnotator {
 	// only way a Store exposes it -- List -- so a test that seeded prov into a
 	// map List never reads would be asserting on something the code cannot
 	// see.
-	f := &fakeAnnotator{fakeStore: base, prov: base.provenance, max: 3000}
+	f := &fakeAnnotator{fakeStore: base, prov: base.provenance}
 	old := openStore
 	openStore = func() (secret.Store, error) { return f, nil }
 	t.Cleanup(func() { openStore = old })
@@ -45,18 +41,12 @@ func newAnnotating(t *testing.T) *fakeAnnotator {
 
 func (f *fakeAnnotator) Write(name string, value []byte, p secret.Provenance, update bool) error {
 	f.calls = append(f.calls, fmt.Sprintf("write:%s:%t", name, update))
-	if len(value) > f.max {
-		return fmt.Errorf("the value for %q is %d bytes, and the store takes at most %d",
-			name, len(value), f.max)
-	}
 	if _, exists := f.items[name]; !exists {
 		f.order = append(f.order, name)
 	}
 	f.items[name], f.prov[name] = value, p
 	return nil
 }
-
-func (f *fakeAnnotator) MaxValue(string, bool) int { return f.max }
 
 func (f *fakeAnnotator) Delete(name string) error {
 	f.calls = append(f.calls, "delete:"+name)
@@ -195,28 +185,18 @@ func TestNamingAHandCreatedSecretIsAnError(t *testing.T) {
 	}
 }
 
-// security truncates an over-long line silently on a four-byte boundary,
-// so the short value still base64-decodes and still resolves. verify catches
-// that on create but explicitly cannot roll back an update -- so the size is
-// checked BEFORE writing, which is what stops a re-import destroying a good
-// value and leaving a resolvable bad one behind.
-func TestOversizeValueIsRefusedBeforeWriting(t *testing.T) {
+// The importer does not cap a value the store accepts.
+func TestLargeValueIsImportedWhole(t *testing.T) {
 	importable(t)
 	store := newAnnotating(t)
-	store.max = 16
-	store.seed("mytool-token", "the-good-value")
-	useHost(t, map[string][]byte{
-		"keychain:Mytool-credentials": bytes.Repeat([]byte("x"), 64),
-	})
+	value := bytes.Repeat([]byte("x"), 20000)
+	useHost(t, map[string][]byte{"keychain:Mytool-credentials": value})
 
-	if err := importSecrets(&bytes.Buffer{}, []string{"mytool"}); err == nil {
-		t.Fatal("an oversize value was accepted")
+	if err := importSecrets(&bytes.Buffer{}, []string{"mytool"}); err != nil {
+		t.Fatal(err)
 	}
-	if len(store.calls) != 0 {
-		t.Errorf("the store was written to before the size was checked: %v", store.calls)
-	}
-	if string(store.items["mytool-token"]) != "the-good-value" {
-		t.Error("the previous good value was destroyed")
+	if got := store.items["mytool-token"]; !bytes.Equal(got, value) {
+		t.Errorf("stored %d bytes of the %d imported", len(got), len(value))
 	}
 }
 
@@ -573,7 +553,7 @@ func TestFromCommandRefusesAValueThatDoesNotEnd(t *testing.T) {
 	useHost(t, nil)
 	var out bytes.Buffer
 	err := importSecrets(&out, []string{"mytool", "mytool-manual",
-		"--from-command", `dd if=/dev/zero bs=1024 count=64 2>/dev/null | tr "\0" a`})
+		"--from-command", `yes | tr -d '\n'`})
 	if err == nil {
 		t.Fatal("stored a value larger than the store takes")
 	}
