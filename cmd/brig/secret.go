@@ -103,7 +103,7 @@ flags:
       --from-command '<sh>'
                     with import: take one secret's value from a command's stdout
 
-The value is never an argument, so it stays out of ps and out of your shell
+The value is never an argument to brig, which keeps it out of your shell
 history. Without -f the value is read from stdin, and one trailing line ending
 is stripped from it.
 `

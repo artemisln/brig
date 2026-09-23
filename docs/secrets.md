@@ -291,7 +291,7 @@ $ brig secret create x < /dev/zero
 brig: the value on stdin is over 65536 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one
 ```
 
-`import --from-command` applies the same cap to its command's stdout. See
+`import` applies the same cap to every source, including `--from-command`. See
 [the size limit](#the-size-limit) for how large values are written.
 
 **stdin strips exactly one trailing line ending, and `-f` does not**. The
@@ -427,7 +427,13 @@ about 3KB of raw value:
 
 A larger value, such as a 4096-bit RSA key or `codex`'s `~/.codex/auth.json`,
 is passed as a command-line argument. `security` truncates an over-long stdin
-line without an error, and has no other input for the value.
+line without an error, and has no other input for the value. Brig prints a
+notice when a write takes this path:
+
+```console
+$ brig secret create deploy-key -f rsa4096.pem
+brig: the value for "deploy-key" is too long for security's stdin, so it is passed to security as an argument (see docs/secrets.md#the-size-limit)
+```
 
 While that `security` process runs, the base64 value is visible to `ps` for
 your user and root, and is recorded by exec auditing (EDR/MDM agents using
@@ -475,6 +481,8 @@ around having one.
 | ``-f was given an empty path. Leave it out to read stdin, or pass `-f -` to say so`` | `-f "$KEYFILE"` with the variable unset. Falling through to stdin stores whatever the script had on it, under your name, and reports success |
 | `--stdin and -f name two different sources; pass one` | both given, and guessing which you meant silently stores the wrong one |
 | `the value on stdin is over 65536 bytes, which is larger than any secret brig can store. If that is a file or a stream rather than a credential, this is the wrong one` | `create` or `update` read more than 64 KiB. `-f FILE` names the file in place of `stdin`; `import --from-command` names the command's stdout |
+| `the value for "x" from … is N bytes, over the 65536-byte cap, so nothing was written` | `import` read more than 64 KiB from a declared source |
+| `the value for "x" is too long for security's stdin, so it is passed to security as an argument …` | a notice, not an error: the write went through [the argv path](#the-size-limit) |
 | `deleting "x" cannot be undone, and there is no terminal to ask on. Pass -y to answer in advance: …` | a cron job or a unit file. `-y` is the answer given ahead |
 | `a secret name holds letters, digits, - and _, ...` | see [Naming a secret](#naming-a-secret) |
 | `no secret store on this platform: … no Secret Service answers on it …` | Linux with no keyring on the D-Bus session bus. Install `gnome-keyring` or KWallet and log in to a desktop session that starts it |

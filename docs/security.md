@@ -281,17 +281,17 @@ brig secret ls
 
 What that means for the things this document is about:
 
-- **The value never appears in argv.** The whole `add-generic-password`
-  command, base64 value and all, goes to `security -i` down a pipe. Brig's
-  own command line is `security -i` and nothing else. This is the same
-  guarantee the forwarding path makes above, for the same reason. `security -i`
-  reads one command per line and blocks for the next. So the write is on the
-  process table only for as long as the pipe stays open. Reproduce it by
-  running `security -i` against a fifo, holding the fifo open with an idle
-  writer. Send the real `add-generic-password` line down it, then read
-  `ps -Ao args` while it sits there. The argv shows `security -i` and nothing
-  more. `security find-generic-password` afterwards confirms the value
-  really was stored. Closing the fifo and deleting the probe item cleans up.
+- **A value that fits the line stays out of argv.** The whole
+  `add-generic-password` command, base64 value included, goes to
+  `security -i` over a pipe, so the process table shows `security -i` and
+  nothing else. To check: run `security -i` against a fifo held open by an
+  idle writer, send an `add-generic-password` line, and read `ps -Ao args`.
+  The line holds about 3KB of raw value. `security` truncates a longer line
+  without an error, so a larger value is passed as an argument, and Brig
+  prints a notice when it does. While that `security` runs, the base64 value
+  is visible to `ps` for your user and root, and to exec auditing such as an
+  EDR agent. Reads and sandbox delivery never use argv. See
+  [secrets.md](secrets.md#the-size-limit).
 - **The item's ACL is the default one.** `security` created these items, so
   `security` is trusted to read them back, with no keychain dialog. The
   consequence is the part worth being clear about: **anything that can run
@@ -310,13 +310,6 @@ What that means for the things this document is about:
   `security find-generic-password -w` by hand, show base64 rather than the
   secret. It is encoding, not encryption, and protects nothing on its own.
   The keychain does that.
-- **A value too big for the line is written through argv.** The 4096-byte
-  line holds the whole command, about 3KB of raw value. `security` truncates
-  a longer line without an error, so a larger value is passed as an argument.
-  While `security` runs, the base64 value is visible to `ps` for your user
-  and root, and to exec auditing such as an EDR agent. Reads and sandbox
-  delivery never use argv. Brig reads back every write. See
-  [secrets.md](secrets.md#the-size-limit).
 - **`brig secret ls` never decrypts.** It reads attributes only, which is why
   listing raises no access prompt and why it can show names and dates but
   never values. Worth being exact about what it reads, though:

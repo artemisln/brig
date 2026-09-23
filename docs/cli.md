@@ -421,9 +421,10 @@ Fill one of them:
 brig secret import claude-code gh-token
 ```
 
-The value is never a command-line argument, so it never appears in `ps` or
-in your shell history. See [secrets.md](secrets.md) for the store,
-provenance and the sources a profile can declare.
+The value is never an argument to `brig`. How it reaches the keychain, and
+when it is visible to `ps`, is in
+[the size limit](secrets.md#the-size-limit). See [secrets.md](secrets.md) for
+the store, provenance and the sources a profile can declare.
 
 ### `brig telemetry`
 
