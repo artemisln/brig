@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +198,24 @@ func TestLargeValueIsImportedWhole(t *testing.T) {
 	}
 	if got := store.items["mytool-token"]; !bytes.Equal(got, value) {
 		t.Errorf("stored %d bytes of the %d imported", len(got), len(value))
+	}
+}
+
+// A declared source over the read cap is refused before anything is written.
+func TestImportRefusesAValueOverTheReadCap(t *testing.T) {
+	importable(t)
+	store := newAnnotating(t)
+	store.seed("mytool-token", "the-good-value")
+	useHost(t, map[string][]byte{
+		"keychain:Mytool-credentials": bytes.Repeat([]byte("x"), maxValueBytes+1),
+	})
+
+	err := importSecrets(&bytes.Buffer{}, []string{"mytool"})
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxValueBytes)) {
+		t.Fatalf("err = %v, want a refusal naming the %d-byte cap", err, maxValueBytes)
+	}
+	if len(store.calls) != 0 {
+		t.Errorf("the store was written to: %v", store.calls)
 	}
 }
 

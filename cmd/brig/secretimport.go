@@ -180,6 +180,10 @@ func importOne(
 	if err != nil {
 		return err
 	}
+	if len(value) > maxValueBytes {
+		return fmt.Errorf("the value for %q from %s is %d bytes, over the %d-byte cap, "+
+			"so nothing was written", d.Name, describe(v.From), len(value), maxValueBytes)
+	}
 
 	current, exists, err := currentValue(store, d.Name)
 	if err != nil {
