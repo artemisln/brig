@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -61,6 +63,10 @@ func (k keychain) Kind() string { return "keychain" }
 // plus the newline are accepted; a longer line is truncated without an error.
 // The limit covers the whole command, not only the value.
 const maxLine = 4096
+
+// notice receives the one-line warning printed when a write takes the argv
+// path.
+var notice io.Writer = os.Stderr
 
 // writeArgs returns the add-generic-password arguments, ending with -w.
 func (k keychain) writeArgs(name string, update bool, p Provenance) ([]string, error) {
@@ -123,10 +129,12 @@ func (k keychain) Write(name string, value []byte, p Provenance, update bool) er
 	}
 	encoded := base64.StdEncoding.EncodeToString(value)
 	var cmd *exec.Cmd
-	if line := interactiveLine(args, encoded); len(line) < maxLine {
+	if len(interactiveLine(args, ""))+len(encoded) < maxLine {
 		cmd = exec.Command(securityBin, "-i")
-		cmd.Stdin = strings.NewReader(line + "\n")
+		cmd.Stdin = strings.NewReader(interactiveLine(args, encoded) + "\n")
 	} else {
+		fmt.Fprintf(notice, "brig: the value for %q is too long for security's stdin, "+
+			"so it is passed to security as an argument (see docs/secrets.md#the-size-limit)\n", name)
 		cmd = exec.Command(securityBin, append(args, encoded)...)
 	}
 	var errb bytes.Buffer

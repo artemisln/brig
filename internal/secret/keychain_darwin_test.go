@@ -243,7 +243,7 @@ func TestWriteRoundTripsAcrossTheLineBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got) != n {
+			if !bytes.Equal(got, value) {
 				t.Errorf("update=%v: %d bytes read back as %d", update, n, len(got))
 			}
 			if !update {
@@ -279,6 +279,29 @@ func TestWriteStoresAValueTooBigForTheInteractiveLine(t *testing.T) {
 				t.Errorf("%d bytes: attributes lack %s:\n%s", n, want, attrs)
 			}
 		}
+	}
+}
+
+// A write that takes the argv path says so on the notice stream; one that
+// fits the line does not.
+func TestArgvWriteIsAnnounced(t *testing.T) {
+	k := testStore(t)
+	var buf bytes.Buffer
+	old := notice
+	notice = &buf
+	t.Cleanup(func() { notice = old })
+
+	if err := k.Create("small", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a small write printed a notice: %q", buf.String())
+	}
+	if err := k.Create("large", randomBytes(t, 5000)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"large"`) || !strings.Contains(buf.String(), "argument") {
+		t.Errorf("notice = %q, want it to name the secret and the argument path", buf.String())
 	}
 }
 
