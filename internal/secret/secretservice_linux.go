@@ -5,7 +5,6 @@ package secret
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -399,7 +398,7 @@ func (s *secretService) List() ([]Secret, error) {
 			Provenance: provenanceFromAttributes(attrs),
 		})
 	}
-	slices.SortFunc(list, func(a, b Secret) int { return strings.Compare(a.Name, b.Name) })
+	sortByName(list)
 	return list, nil
 }
 

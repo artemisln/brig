@@ -13,6 +13,8 @@ package secret
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -86,6 +88,11 @@ type Annotator interface {
 // back on an update.
 type Sizer interface {
 	MaxValue(name string, update bool) int
+}
+
+// sortByName orders a listing the way every backend reports it.
+func sortByName(list []Secret) {
+	slices.SortFunc(list, func(a, b Secret) int { return strings.Compare(a.Name, b.Name) })
 }
 
 // Open returns the store for this host. The platform files supply open(),

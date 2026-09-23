@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
-	"slices"
 	"strings"
 	"time"
 )
@@ -54,8 +53,6 @@ type keychain struct{ service string }
 var _ Store = keychain{}
 var _ Annotator = keychain{}
 var _ Sizer = keychain{}
-
-func open() (Store, error) { return keychain{service: service}, nil }
 
 func (k keychain) Kind() string { return "keychain" }
 
@@ -238,7 +235,8 @@ func (k keychain) write(name string, value []byte, update bool) error {
 // write failed will reasonably expect nothing to be there. An update cannot be
 // undone that way: the previous value is already gone, so it only reports.
 func (k keychain) verify(name string, value []byte, update bool) error {
-	stored, err := k.Read(name)
+	// No native-item probe here: this store wrote the item a moment ago.
+	stored, err := k.read(name, false)
 	if err != nil {
 		return fmt.Errorf("%q was written but could not be read back: %w", name, err)
 	}
@@ -260,8 +258,32 @@ func (k keychain) Create(name string, value []byte) error {
 }
 
 func (k keychain) Read(name string) ([]byte, error) {
+	return k.read(name, true)
+}
+
+// read is Read, with the native-item probe optional for a caller that
+// knows this store wrote the item.
+//
+// The probe reads attributes first, and never the value of an item the
+// native store wrote. security cannot decrypt one: its ACL names brig's
+// signed binary, and asking anyway puts a keychain dialog on screen, which
+// headless is a hang. The description attribute says which store wrote
+// it, and it is readable without any of that.
+func (k keychain) read(name string, probe bool) ([]byte, error) {
 	if err := ValidName(name); err != nil {
 		return nil, err
+	}
+	if probe {
+		attrs, err := k.attributes(name)
+		if err != nil {
+			return nil, err
+		}
+		if attr(attrs, "desc") == nativeDescription {
+			return nil, fmt.Errorf("%q was stored by a signed brig through Security.framework, and this "+
+				"build reaches the keychain through security(1), which cannot read it without a "+
+				"keychain dialog. Run the signed brig, or set BRIG_KEYCHAIN=native if this build is signed",
+				name)
+		}
 	}
 	cmd := exec.Command(securityBin, "find-generic-password",
 		"-s", k.service, "-a", name, "-w")
@@ -301,20 +323,26 @@ func (k keychain) Update(name string, value []byte) error {
 	return k.write(name, value, true)
 }
 
-// exists reports whether a secret is there without decrypting it: no -w, so
-// this reads attributes only.
+// exists reports whether a secret is there without decrypting it.
 func (k keychain) exists(name string) error {
+	_, err := k.attributes(name)
+	return err
+}
+
+// attributes is the item's attribute block, the same text dump-keychain
+// prints for it: no -w, so nothing is decrypted and no dialog can be raised.
+func (k keychain) attributes(name string) (string, error) {
 	cmd := exec.Command(securityBin, "find-generic-password",
 		"-s", k.service, "-a", name)
-	var errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &bytes.Buffer{}, &errb
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
 		if status(err) == codeNotFound {
-			return ErrNotFound
+			return "", ErrNotFound
 		}
-		return securityError(err, errb.String())
+		return "", securityError(err, errb.String())
 	}
-	return nil
+	return out.String(), nil
 }
 
 func (k keychain) Delete(name string) error {
@@ -371,7 +399,7 @@ func parseDump(dump, service string) []Secret {
 		}
 		list = append(list, Secret{Name: name, Modified: modified(block), Provenance: provenance(block)})
 	}
-	slices.SortFunc(list, func(a, b Secret) int { return strings.Compare(a.Name, b.Name) })
+	sortByName(list)
 	return list
 }
 
