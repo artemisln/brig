@@ -11,6 +11,17 @@
 create and delete items under service names prefixed `sh.brig.secret.test.`
 (`internal/secret/keychain_darwin_test.go:21`).
 
+On macOS a plain `go build` is ad-hoc signed, and brig then keeps secrets
+through `security(1)` rather than through Security.framework, because an
+ad-hoc signature is a new application to the keychain on every rebuild. To
+run a local build the way a release runs, sign it with an identity of your
+own: in Keychain Access, Certificate Assistant, Create a Certificate, with
+type Code Signing and a name such as `brig-dev`. Then
+`BRIG_SIGN_IDENTITY=brig-dev make build`. `brig doctor` reports which store a
+binary uses on its `secrets` line, and `BRIG_KEYCHAIN=native` or
+`BRIG_KEYCHAIN=security` overrides the choice. See
+[docs/secrets.md](docs/secrets.md#two-ways-into-the-keychain).
+
 `script/smoke.sh` drives the real binary against a stub runtime. It cannot
 catch a change to how Brig invokes the real one: `hull` on macOS, `nerdctl`
 on Linux. Boot a real sandbox before you open a pull request that touches the
@@ -40,13 +51,19 @@ only static gates.
 
 ## Dependencies
 
-Brig has three direct dependencies: `sigs.k8s.io/yaml` for profiles,
-`golang.org/x/sys` for terminal and process calls, and
-`github.com/godbus/dbus/v5` for the Linux secret store. That list is
-deliberately short. Brig shells out to `cosign`, `oras` and `security`
+Brig has four direct dependencies: `sigs.k8s.io/yaml` for profiles,
+`golang.org/x/sys` for terminal and process calls,
+`github.com/godbus/dbus/v5` for the Linux secret store, and
+`github.com/ebitengine/purego` to call Security.framework on macOS without
+cgo. That list is deliberately short. Brig shells out to `cosign` and `oras`
 rather than linking them, which keeps the attack surface of a tool that
-handles credentials small. Do not add a dependency without saying in the
-pull request why shelling out or using the standard library will not do.
+handles credentials small. `security` is the one place a shell-out was
+replaced by a library, and the reason is on record: `security -i` caps a
+value at about 3 KB and gives every item an ACL any process running as you
+can pass. purego supplies only `dlopen`, `dlsym` and the call trampolines;
+every framework call is brig's own code in `internal/secret/cf_darwin.go`.
+Do not add a dependency without saying in the pull request why shelling out
+or using the standard library will not do.
 
 ## The two promises
 

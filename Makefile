@@ -15,9 +15,17 @@ LDFLAGS := -s -w \
 
 all: vet test build
 
+# BRIG_SIGN_IDENTITY names a code-signing identity in your keychain. Set, the
+# binaries are signed with it after the build, and a local build then uses
+# the native keychain store the way a release does. CONTRIBUTING.md says why.
+BRIG_SIGN_IDENTITY ?=
+
 build:
 	go build -ldflags '$(LDFLAGS)' -o $(BINDIR)/brig ./cmd/brig
 	go build -ldflags '$(LDFLAGS)' -o $(BINDIR)/brigd ./cmd/brigd
+ifneq ($(BRIG_SIGN_IDENTITY),)
+	for b in brig brigd; do codesign --force --sign "$(BRIG_SIGN_IDENTITY)" --identifier $$b $(BINDIR)/$$b; done
+endif
 
 test:
 	go test -race ./...
