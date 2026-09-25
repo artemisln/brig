@@ -720,7 +720,14 @@ func (c *Config) ExecAttached(set creds.Set, argv []string, tty bool) (int, erro
 // function or the profile sets an EXIT trap. bash then stays as the parent,
 // and a SIGTERM to the session ends bash but not the command; see
 // docs/migration.md.
+//
+// A leading -c is sh's own: the word after it is a script for the login shell
+// and the rest are its $0, $1 and on. That is the one form bash parses, and
+// the caller asks for it by name.
 func shellArgv(command []string) []string {
+	if len(command) > 0 && command[0] == "-c" {
+		return append([]string{"bash", "-lc"}, command[1:]...)
+	}
 	if len(command) > 0 {
 		return append([]string{"bash", "-lc", `"$@"`, "bash"}, command...)
 	}
