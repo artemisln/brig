@@ -157,12 +157,15 @@ func TestSupportsRefusesGUIOffVz(t *testing.T) {
 // channel that is about to carry the same credentials.
 func TestFeedKeepsTheValueOutOfArgv(t *testing.T) {
 	h := &hull{bin: "hull"}
-	args, _ := h.execArgs(ExecSpec{
+	args, _, err := h.execArgs(ExecSpec{
 		Name:  "brig-claude-code",
 		User:  "root",
 		Cmd:   []string{"sh", "-c", "cat > /run/brig/secrets/claude-credentials"},
 		Stdin: strings.NewReader("super-secret-value"),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "super-secret-value") {
 		t.Fatalf("the value reached argv: %s", joined)

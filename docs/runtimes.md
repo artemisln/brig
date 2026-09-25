@@ -111,8 +111,8 @@ hull run --detach --name <name>
      [--gateway-sock <path> --gateway-cidr <cidr>]
      [--shared-dir <host>:<guest>[:ro]]...
      [--gui [--gui-title <title>]]
-     [--env <NAME>]... <image>
-hull exec [-t] [--cwd <dir>] [-u <user>] [--env <NAME>]... <name> -- <cmd>...
+     [--env <NAME>|<NAME>=<value>]... <image>
+hull exec [-t] [--cwd <dir>] [-u <user>] [--env <NAME>|<NAME>=<value>]... <name> -- <cmd>...
 hull logs [--follow] [--tail <n>] <name>
 hull stop <name>
 hull rm <name>
@@ -168,8 +168,8 @@ nerdctl run --detach --name <name>
      [--annotation com.urunc.unikernel.bootInitrd=<path>]
      [--annotation com.urunc.unikernel.hypervisor=cloud-hypervisor]
      [-v <host>:<guest>[:ro]]... [--tmpfs <path>:<options>]...
-     [-e <NAME>]... <image> sleep infinity
-nerdctl exec -i [-t] [-w <dir>] [-u <user>] [-e <NAME>]... <name> <cmd>...
+     [-e <NAME>|<NAME>=<value>]... <image> sleep infinity
+nerdctl exec -i [-t] [-w <dir>] [-u <user>] [-e <NAME>|<NAME>=<value>]... <name> <cmd>...
 nerdctl logs [--follow] [--tail <n>] <name>
 nerdctl stop <name>
 nerdctl rm <name>
@@ -198,6 +198,10 @@ name goes in argv, so nothing readable in `ps` carries a secret. `BRIG_ENV_ARGV=
 puts ordinary values back on the command line for a runtime build that cannot
 take a bare `--env NAME`. A value Brig resolved on your behalf stays off
 the command line even then.
+
+The guest's `HOME`, `PATH`, `TMPDIR` and `XDG_*` go on the command line as
+`--env NAME=value` (`-e NAME=value` for nerdctl), because the runtime reads
+those names for itself. See [security.md](security.md#not-in-argv).
 
 ## How Brig finds the runtime
 
@@ -239,7 +243,8 @@ beyond them:
 
 - a bare `--env NAME`, taking the value from its own environment. Without it
   the only way to forward a credential is `BRIG_ENV_ARGV=1`, which puts values
-  where `ps` can read them.
+  where `ps` can read them. It also takes `--env NAME=value`, which is how
+  the guest's `HOME`, `PATH`, `TMPDIR` and `XDG_*` arrive.
 - `exec -u root`, which is how Brig mounts a tmpfs inside a running sandbox.
   Container runtimes get their tmpfs at create time instead
   (`internal/wrap/secretfiles.go`).

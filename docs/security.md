@@ -270,6 +270,14 @@ Forwarded values go into the runtime process's own environment, and only the
 variable *name* appears on its command line. So a forwarded credential is not
 readable in `ps` by other processes on the host.
 
+`HOME`, `PATH`, `TMPDIR` and any `XDG_` variable are the exception. The
+runtime reads these for itself: hull keeps its store under `HOME` and finds
+`hvi` on `PATH`, and a rootless nerdctl reads its registry config under
+`HOME`. A guest value there would redirect the runtime, so Brig passes these
+on the command line as `NAME=value`, on every run. None of them carries a
+credential, and `BRIG_ENV_ARGV`'s warning does not list them. A stored
+secret bound to one of these names is refused.
+
 `BRIG_ENV_ARGV=1` puts them back on the command line for a runtime build that
 does not accept a bare `--env KEY`. That gives up the guarantee for a value
 read from the environment. A value Brig resolved on your behalf is exempt

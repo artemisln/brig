@@ -395,7 +395,10 @@ func (n *nerdctl) runArgs(spec RunSpec) (args, env []string, err error) {
 	for _, t := range spec.Tmpfs {
 		args = append(args, "--tmpfs", t)
 	}
-	envArgs, envVals := splitEnv("-e", spec.Env)
+	envArgs, envVals, err := splitEnv("-e", spec.Env)
+	if err != nil {
+		return nil, nil, err
+	}
 	args = append(args, envArgs...)
 	// A container exits when its command does, and the sandbox has to outlive
 	// the exec that uses it -- the whole point is that the VM keeps running
@@ -409,7 +412,7 @@ func (n *nerdctl) runArgs(spec RunSpec) (args, env []string, err error) {
 	return args, envVals, nil
 }
 
-func (n *nerdctl) execArgs(spec ExecSpec) (args, env []string) {
+func (n *nerdctl) execArgs(spec ExecSpec) (args, env []string, err error) {
 	args = []string{"exec", "-i"}
 	if spec.TTY {
 		args = append(args, "-t")
@@ -420,21 +423,30 @@ func (n *nerdctl) execArgs(spec ExecSpec) (args, env []string) {
 	if spec.User != "" {
 		args = append(args, "-u", spec.User)
 	}
-	envArgs, envVals := splitEnv("-e", spec.Env)
+	envArgs, envVals, err := splitEnv("-e", spec.Env)
+	if err != nil {
+		return nil, nil, err
+	}
 	args = append(args, envArgs...)
 	args = append(args, spec.Name)
-	return append(args, spec.Cmd...), envVals
+	return append(args, spec.Cmd...), envVals, nil
 }
 
 func (n *nerdctl) Probe(spec ExecSpec) bool {
-	args, envVals := n.execArgs(spec)
+	args, envVals, err := n.execArgs(spec)
+	if err != nil {
+		return false
+	}
 	cmd := exec.Command(n.bin, args...)
 	cmd.Env = mergeEnv(telemetryEnv(false), envVals)
 	return cmd.Run() == nil
 }
 
 func (n *nerdctl) Output(spec ExecSpec) (string, error) {
-	args, envVals := n.execArgs(spec)
+	args, envVals, err := n.execArgs(spec)
+	if err != nil {
+		return "", err
+	}
 	cmd := exec.Command(n.bin, args...)
 	cmd.Env = mergeEnv(telemetryEnv(spec.Counted), envVals)
 	var out bytes.Buffer
@@ -450,7 +462,10 @@ func (n *nerdctl) Output(spec ExecSpec) (string, error) {
 // agent-socket accept-before-guest window here, so unlike hull's Feed this
 // needs no separate deadline.
 func (n *nerdctl) Feed(spec ExecSpec) error {
-	args, envVals := n.execArgs(spec)
+	args, envVals, err := n.execArgs(spec)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command(n.bin, args...)
 	cmd.Env = mergeEnv(telemetryEnv(spec.Counted), envVals)
 	cmd.Stdin = spec.Stdin
@@ -468,15 +483,21 @@ func (n *nerdctl) Feed(spec ExecSpec) error {
 // replaceCmd builds the handover argv and environment in one place, so the
 // terminal handover and the --json child cannot drift: Replace and Attach both
 // read from here, the way the hull adapter's replaceCmd serves both there.
-func (n *nerdctl) replaceCmd(spec ExecSpec) (argv, env []string) {
-	args, envVals := n.execArgs(spec)
+func (n *nerdctl) replaceCmd(spec ExecSpec) (argv, env []string, err error) {
+	args, envVals, err := n.execArgs(spec)
+	if err != nil {
+		return nil, nil, err
+	}
 	argv = append([]string{n.bin}, args...)
 	env = mergeEnv(telemetryEnv(spec.Counted), envVals)
-	return argv, env
+	return argv, env, nil
 }
 
 func (n *nerdctl) Replace(spec ExecSpec) error {
-	argv, env := n.replaceCmd(spec)
+	argv, env, err := n.replaceCmd(spec)
+	if err != nil {
+		return err
+	}
 	return execHandover(n.bin, argv, env)
 }
 
@@ -484,7 +505,10 @@ func (n *nerdctl) Replace(spec ExecSpec) error {
 // --json path. It builds from replaceCmd, exactly as Replace does, so the two
 // carry the same argv and env.
 func (n *nerdctl) Attach(spec ExecSpec) (int, error) {
-	argv, env := n.replaceCmd(spec)
+	argv, env, err := n.replaceCmd(spec)
+	if err != nil {
+		return 0, err
+	}
 	return attachHandover(argv, env)
 }
 

@@ -495,8 +495,8 @@ func isolatedNet(net string, policy Egress) bool {
 
 // runArgs is the one place the run command line is built, so that what a test
 // asserts and what boots a sandbox cannot drift apart. It returns the argv
-// and the environment carrying the guest variables, which never travel in
-// argv; see splitEnv.
+// and the environment carrying the guest variables. splitEnv decides which
+// values go in which.
 //
 // fetch populates the boot assets when a genericBoot profile finds them
 // missing. It is a parameter rather than a method so that this stays a pure
@@ -543,7 +543,10 @@ func runArgs(spec RunSpec, hv, net, gatewaySock, gatewayCidr string, locate asse
 			args = append(args, "--gui-title", spec.GUITitle)
 		}
 	}
-	envArgs, envVals := splitEnv("--env", spec.Env)
+	envArgs, envVals, err := splitEnv("--env", spec.Env)
+	if err != nil {
+		return nil, nil, err
+	}
 	args = append(args, envArgs...)
 	// The verified digest when one was resolved, so the bytes that boot are the
 	// bytes cosign checked; hull resolves it against its store from rc23.
@@ -553,7 +556,7 @@ func runArgs(spec RunSpec, hv, net, gatewaySock, gatewayCidr string, locate asse
 
 // execArgs is the one place the exec command line is built, so the probe, the
 // captured read and the terminal handover cannot drift apart.
-func (h *hull) execArgs(spec ExecSpec) (args, env []string) {
+func (h *hull) execArgs(spec ExecSpec) (args, env []string, err error) {
 	args = []string{"exec"}
 	if spec.TTY {
 		args = append(args, "-t")
@@ -564,10 +567,13 @@ func (h *hull) execArgs(spec ExecSpec) (args, env []string) {
 	if spec.User != "" {
 		args = append(args, "-u", spec.User)
 	}
-	envArgs, envVals := splitEnv("--env", spec.Env)
+	envArgs, envVals, err := splitEnv("--env", spec.Env)
+	if err != nil {
+		return nil, nil, err
+	}
 	args = append(args, envArgs...)
 	args = append(args, spec.Name, "--")
-	return append(args, spec.Cmd...), envVals
+	return append(args, spec.Cmd...), envVals, nil
 }
 
 // agentCallTimeout bounds a single question put to the guest agent.
@@ -601,16 +607,22 @@ const agentCallTimeout = 5 * time.Second
 const agentCallWaitDelay = time.Second
 
 // agentCall builds a command to the guest agent that is guaranteed to return.
-func (h *hull) agentCall(spec ExecSpec) (*exec.Cmd, context.CancelFunc, []string) {
-	args, envVals := h.execArgs(spec)
+func (h *hull) agentCall(spec ExecSpec) (*exec.Cmd, context.CancelFunc, []string, error) {
+	args, envVals, err := h.execArgs(spec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), agentCallTimeout)
 	cmd := exec.CommandContext(ctx, h.bin, args...)
 	cmd.WaitDelay = agentCallWaitDelay
-	return cmd, cancel, envVals
+	return cmd, cancel, envVals, nil
 }
 
 func (h *hull) Probe(spec ExecSpec) bool {
-	cmd, cancel, envVals := h.agentCall(spec)
+	cmd, cancel, envVals, err := h.agentCall(spec)
+	if err != nil {
+		return false
+	}
 	defer cancel()
 	cmd.Env = mergeEnv(telemetryEnv(false), envVals)
 	return cmd.Run() == nil
@@ -620,7 +632,10 @@ func (h *hull) Output(spec ExecSpec) (string, error) {
 	// Bounded for the same reason as Probe: this asks the guest which
 	// workspace it mounts, on the same socket, and its caller treats silence
 	// as "cannot say" rather than waiting on it.
-	cmd, cancel, envVals := h.agentCall(spec)
+	cmd, cancel, envVals, err := h.agentCall(spec)
+	if err != nil {
+		return "", err
+	}
 	defer cancel()
 	cmd.Env = mergeEnv(h.telemetryEnvFor(spec.Counted, false), envVals)
 	var out bytes.Buffer
@@ -637,7 +652,10 @@ func (h *hull) Output(spec ExecSpec) (string, error) {
 // does, so an unbounded write into that window blocks forever with nothing
 // printed.
 func (h *hull) Feed(spec ExecSpec) error {
-	cmd, cancel, envVals := h.agentCall(spec)
+	cmd, cancel, envVals, err := h.agentCall(spec)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	cmd.Env = mergeEnv(h.telemetryEnvFor(spec.Counted, false), envVals)
 	cmd.Stdin = spec.Stdin
@@ -665,7 +683,10 @@ func (h *hull) MaxFeed() int { return maxFeed }
 // TUI gets the real terminal, ^C reaches it rather than brig, and its exit
 // status is brig's exit status without any relaying.
 func (h *hull) Replace(spec ExecSpec) error {
-	argv, env := h.replaceCmd(spec)
+	argv, env, err := h.replaceCmd(spec)
+	if err != nil {
+		return err
+	}
 	return execHandover(h.bin, argv, env)
 }
 
@@ -674,7 +695,10 @@ func (h *hull) Replace(spec ExecSpec) error {
 // its command from replaceCmd, the one function Replace uses too, so the child
 // and the process replacement carry byte-for-byte the same argv and env.
 func (h *hull) Attach(spec ExecSpec) (int, error) {
-	argv, env := h.replaceCmd(spec)
+	argv, env, err := h.replaceCmd(spec)
+	if err != nil {
+		return 0, err
+	}
 	return attachHandover(argv, env)
 }
 
@@ -691,11 +715,14 @@ func (h *hull) Attach(spec ExecSpec) (int, error) {
 // hull's on-by-default send the first-boot event. When CanAsk is false and no
 // answer is on file the boot rule applies and the exec is suppressed. See
 // telemetryEnvFor.
-func (h *hull) replaceCmd(spec ExecSpec) (argv, env []string) {
-	args, envVals := h.execArgs(spec)
+func (h *hull) replaceCmd(spec ExecSpec) (argv, env []string, err error) {
+	args, envVals, err := h.execArgs(spec)
+	if err != nil {
+		return nil, nil, err
+	}
 	argv = append([]string{h.bin}, args...)
 	env = mergeEnv(h.telemetryEnvFor(spec.Counted, spec.CanAsk), envVals)
-	return argv, env
+	return argv, env, nil
 }
 
 // Stop also stops the gateway of an isolated sandbox. That gateway serves

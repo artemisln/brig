@@ -534,6 +534,15 @@ is the first thing that puts the source in the file where you can see it.
 not a credential, `EDITOR: vi` above, say. An entry has exactly one of
 `value:` or `ref:`. Both or neither is refused.
 
+### `HOME`, `PATH`, `TMPDIR` and `XDG_*`
+
+The runtime reads these names for itself, so Brig passes their guest values
+on the runtime's command line as `NAME=value`. See
+[security.md](security.md#not-in-argv). A binding for one of them takes
+`value:` or `ref: env.<name>`. One that resolves from the secret store is
+refused when the sandbox boots or execs, because a stored secret never goes
+on the command line.
+
 ### `BRIG_FORWARD_ENV` replaces the env-sourced set, and only that set
 
 `BRIG_FORWARD_ENV` still overrides which variables are carried in from

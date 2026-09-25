@@ -118,10 +118,12 @@ func (c *Config) reportArgv(set creds.Set) {
 // is anywhere anything else can read it. BuildEnv is the last point where the
 // whole forwarded set is known and nothing has been spawned yet.
 //
-// The list is everything whose value lands on the command line, brig's own
-// plumbing included -- GIT_TERMINAL_PROMPT is not a credential and is on there
-// all the same. A warning that named only the interesting half would be a false
-// statement about the command line, and the command line is the whole subject.
+// The list is everything whose value the hatch puts on the command line, brig's
+// own plumbing included -- GIT_TERMINAL_PROMPT is not a credential and is on
+// there all the same. A warning that named only the interesting half would be a
+// false statement about what the hatch does. HOME and the other names the
+// runtime reads for itself are on the command line with the hatch off too, so
+// they are not in it; see runtime.ArgvExposed.
 func (c *Config) warnArgvExposure(set creds.Set) {
 	names := runtime.ArgvExposed(set.Vars)
 	if len(names) == 0 {

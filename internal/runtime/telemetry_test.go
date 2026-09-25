@@ -154,7 +154,10 @@ func TestTerminalHandoverStaysAskable(t *testing.T) {
 func TestShellHandoverSeparatesPtyFromConsent(t *testing.T) {
 	h, _ := stubTelemetryHull(t, "not configured (on by default; interactive runs will be asked)")
 
-	argv, env := h.replaceCmd(ExecSpec{Name: "vm", Cmd: []string{"bash", "-lc", "ls"}, Counted: true, TTY: true, CanAsk: false})
+	argv, env, err := h.replaceCmd(ExecSpec{Name: "vm", Cmd: []string{"bash", "-lc", "ls"}, Counted: true, TTY: true, CanAsk: false})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if line := strings.Join(argv, " "); !strings.Contains(line, "exec -t") {
 		t.Errorf("the guest lost its pty when brig's stdin was not a terminal: %s", line)
 	}
@@ -164,7 +167,10 @@ func TestShellHandoverSeparatesPtyFromConsent(t *testing.T) {
 
 	// Same handover with a terminal on brig's stdin: hull can put the question
 	// to a person, so the gate leaves it unsuppressed, and the pty is unchanged.
-	argv, env = h.replaceCmd(ExecSpec{Name: "vm", Cmd: []string{"bash", "-l"}, Counted: true, TTY: true, CanAsk: true})
+	argv, env, err = h.replaceCmd(ExecSpec{Name: "vm", Cmd: []string{"bash", "-l"}, Counted: true, TTY: true, CanAsk: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := strings.Join(env, " "); strings.Contains(got, "HULL_TELEMETRY_SUPPRESS=1") {
 		t.Errorf("an interactive shell could not be asked the consent question: %s", got)
 	}
