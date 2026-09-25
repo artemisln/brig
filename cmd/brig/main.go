@@ -427,9 +427,9 @@ func dispatch(args []string) error {
 		// for.
 		//
 		// Both keep their own branch below rather than being translated to sh.
-		// exec runs its argv directly where sh runs it through `bash -lc`, so a
-		// script that relies on its own quoting keeps it -- a rename must not
-		// change what a working line does.
+		// exec runs its argv directly where sh runs it under a login shell, so
+		// a script that relies on exec's environment keeps it -- a rename must
+		// not change what a working line does.
 		deprecated("brig "+verb, "brig sh")
 	case "env":
 		// Kept for one release as a spelling of `brig info`. The bug report
