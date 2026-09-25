@@ -54,6 +54,9 @@ type Share struct {
 // through argv: an implementation puts Name=Value in the environment of the
 // runtime process it spawns and names only the bare Name on the command line.
 // Values in argv would be readable in `ps` by any process on the host.
+//
+// The exception is a name the runtime reads for itself, such as HOME. That
+// value goes on the command line as Name=Value. See runtimeReads.
 type Var struct {
 	Name  string
 	Value string
@@ -468,19 +471,48 @@ func runnable(bin string) error {
 // them, so it is opt-in and says so.
 func envInArgv() bool { return os.Getenv("BRIG_ENV_ARGV") == "1" }
 
+// runtimeReads reports whether the runtime process reads a variable of this
+// name for itself.
+//
+// A guest value for such a name cannot travel in the runtime's own
+// environment, because there it changes what the runtime does. hull keeps its
+// store under HOME and finds hvi on PATH, and a rootless nerdctl reads its
+// registry config under HOME and its sockets under XDG_RUNTIME_DIR. So the
+// value goes in argv as NAME=value, whatever BRIG_ENV_ARGV says.
+//
+// None of these names carries a credential. A runtime's own namespace can, so
+// it is left out: hull reads a registry token from HULL_REGISTRY_TOKEN.
+func runtimeReads(name string) bool {
+	switch name {
+	case "HOME", "PATH", "TMPDIR":
+		return true
+	}
+	return strings.HasPrefix(name, "XDG_")
+}
+
 // inArgv is the single rule for whether a value travels on the command line:
-// the hatch is on, and brig did not resolve the value on the user's behalf.
+// the runtime reads the name for itself, or the hatch puts it there. A Var
+// marked Secret is never on the command line.
 //
 // Written once because two callers need it. splitEnv builds the command line
-// from it, and ArgvExposed reports what that command line will carry before
-// anything is spawned. A report derived from a second copy of the rule is a
-// report that can be wrong in exactly the case it exists for.
-func inArgv(v Var) bool { return envInArgv() && !v.Secret }
+// from it, and ArgvExposed reports the hatch's part of it before anything is
+// spawned. A report derived from a second copy of the rule is a report that
+// can be wrong in exactly the case it exists for.
+func inArgv(v Var) bool { return (runtimeReads(v.Name) && !v.Secret) || hatchExposes(v) }
 
-// ArgvExposed names the variables whose values this invocation would put on
-// the runtime's command line, in the order they were given. It returns nothing
+// hatchExposes reports whether BRIG_ENV_ARGV is what puts this value on the
+// command line: the hatch is on, brig did not resolve the value on the user's
+// behalf, and the runtime does not read the name for itself.
+func hatchExposes(v Var) bool { return envInArgv() && !v.Secret && !runtimeReads(v.Name) }
+
+// ArgvExposed names the variables whose values BRIG_ENV_ARGV puts on the
+// runtime's command line, in the order they were given. It returns nothing
 // when the hatch is off, and never names a Var marked Secret: splitEnv keeps
 // those off the command line whatever the setting says.
+//
+// It does not name HOME, PATH, TMPDIR or an XDG_ variable. Those are on the
+// command line on every run, hatch or not, and none of them is a credential.
+// Naming HOME on every run would bury the names this report is for.
 //
 // Exported so the exposure can be said out loud before the runtime is invoked.
 // BRIG_ENV_ARGV is opted into once, in a shell profile, and then remembered by
@@ -491,7 +523,7 @@ func inArgv(v Var) bool { return envInArgv() && !v.Secret }
 func ArgvExposed(vars []Var) []string {
 	var names []string
 	for _, v := range vars {
-		if inArgv(v) {
+		if hatchExposes(v) {
 			names = append(names, v.Name)
 		}
 	}
@@ -499,12 +531,19 @@ func ArgvExposed(vars []Var) []string {
 }
 
 // splitEnv turns guest variables into the argv flags and the child-process
-// environment that carry them, keeping values out of argv unless the escape
-// hatch is set -- and even then, a Var marked Secret stays out of argv, because
-// the escape hatch predates this feature and was only ever meant to expose
-// ambient shell values, not keychain secrets.
-func splitEnv(flag string, vars []Var) (args []string, env []string) {
+// environment that carry them. See inArgv for which values go in argv.
+//
+// A Var marked Secret with a name the runtime reads for itself is refused. It
+// cannot go in argv, where the host durably logs it, and it cannot go in the
+// runtime's environment, where it would redirect the runtime.
+func splitEnv(flag string, vars []Var) (args []string, env []string, err error) {
 	for _, v := range vars {
+		if v.Secret && runtimeReads(v.Name) {
+			return nil, nil, fmt.Errorf("%s cannot come from a stored secret: the runtime "+
+				"reads %s for itself, so brig passes its value on the command line, where a "+
+				"stored secret never goes. Bind %s with value: or ref: env.<name> instead",
+				v.Name, v.Name, v.Name)
+		}
 		if inArgv(v) {
 			args = append(args, flag, v.Name+"="+v.Value)
 			continue
@@ -512,7 +551,7 @@ func splitEnv(flag string, vars []Var) (args []string, env []string) {
 		args = append(args, flag, v.Name)
 		env = append(env, v.Name+"="+v.Value)
 	}
-	return args, env
+	return args, env, nil
 }
 
 // withDigest rewrites image to name digest in place of its tag, so the runtime

@@ -92,9 +92,10 @@ case "$verb" in
     printf '%s' "$name" > "$STUB_STATE"
     printf '%s' "${share%%:*}" > "$STUB_STATE.share"
     # Record which credential values arrived through the environment rather
-    # than through argv.
+    # than through argv, and the HOME this process runs with.
     printf 'env-token:%s\n' "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" >> "$STUB_LOG"
     printf 'env-gh:%s\n' "${GH_TOKEN:-<unset>}" >> "$STUB_LOG"
+    printf 'env-home:%s\n' "${HOME:-<unset>}" >> "$STUB_LOG"
     ;;
   exec)
     # Everything after -- is the guest command. /bin/true is the readiness
@@ -176,6 +177,7 @@ case "$verb" in
         ;;
       *)
         printf 'env-token:%s\n' "${CLAUDE_CODE_OAUTH_TOKEN:-<unset>}" >> "$STUB_LOG"
+        printf 'env-home:%s\n' "${HOME:-<unset>}" >> "$STUB_LOG"
         # The agent (or login shell) exec. STUB_EXEC_EXIT makes it exit non-zero,
         # which is how the --json case drives the child path: brig runs this as a
         # child rather than replacing itself, so it survives to report the status.
@@ -290,6 +292,16 @@ grep -q 'env-token:env-token-secret' "$STUB_LOG" \
 # the token brig's git helper reads.
 grep '^argv:' "$STUB_LOG" | grep -q -- '--env GH_TOKEN' \
   && ok "argv names the variables only" || bad "argv names the variables only"
+# hull keeps its store under the HOME it runs with. The guest HOME travels on
+# the command line, and hull keeps the caller's own (#337).
+grep '^argv: run ' "$STUB_LOG" | grep -q -- "--env HOME=$GUEST_HOME " \
+  && ok "the guest HOME is on the run line" || bad "the guest HOME is on the run line"
+grep '^argv: exec ' "$STUB_LOG" | grep -- '-- claude -p hi' | grep -q -- "--env HOME=$GUEST_HOME " \
+  && ok "the guest HOME is on the exec line" || bad "the guest HOME is on the exec line"
+homes="$(grep '^env-home:' "$STUB_LOG" | sort -u)"
+[ "$homes" = "env-home:$HOME" ] \
+  && ok "hull runs with the caller's HOME" \
+  || bad "hull runs with the caller's HOME ($HOME) -- got: $homes"
 
 grep -q -- "--shared-dir $WS:$GUEST_HOME" "$STUB_LOG" \
   && ok "the workspace is mounted as the guest home" || bad "workspace is mounted as the guest home"
