@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Refuse documentation that teaches a command spelling brig is about to remove.
 #
-# brig renamed most of its verbs during the 0.1 series. Every old spelling still
-# works and prints one line naming its replacement, and all of them are
-# scheduled for removal in 0.3. That grace period is exactly what makes the
+# brig renamed most of its verbs during the 0.1 series. Every old spelling but
+# `brig shell`, which is already removed, still works and prints one line
+# naming its replacement, and the rest are scheduled for removal in 0.3. That grace period is exactly what makes the
 # problem invisible: a doc teaching `brig profiles` is not broken today, so
 # nothing fails and no reader complains, and it becomes wrong on the release
 # that drops the alias. Issue #111 asks for this to be checked rather than
@@ -62,7 +62,7 @@ names=(
 	'brig profiles / brig agents / brig template / brig profile <verb> -> brig agent <verb>'
 	'brig policies -> brig policy ls'
 	'brig create / brig reset / brig env -> brig run -d / brig rm --all / brig info'
-	'brig exec / brig shell -> brig sh'
+	'brig exec / brig shell (removed) -> brig sh'
 	'brig import / brig export -> brig agent import / brig agent export'
 	'brig agent list|save|load -> brig agent ls|export|import'
 	'brig policy list -> brig policy ls'

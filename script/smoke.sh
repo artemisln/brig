@@ -1984,7 +1984,20 @@ retired() {
 }
 "$WORK/brig" run claude -d > /dev/null 2>&1
 retired 'brig sh' exec claude -- true
-retired 'brig sh' shell claude echo hi
+# brig shell is the one retired spelling already removed: a usage error that
+# names sh, and nothing reaches the runtime.
+: > "$STUB_LOG"
+"$WORK/brig" shell claude echo hi > "$WORK/removed.out" 2>&1
+rc=$?
+[ "$rc" = 2 ] \
+  && ok "brig shell is refused as a usage error" \
+  || bad "brig shell is refused as a usage error -- rc $rc: $(cat "$WORK/removed.out")"
+grep -q 'brig sh <ref>' "$WORK/removed.out" \
+  && ok "brig shell names brig sh" \
+  || bad "brig shell names brig sh -- got: $(cat "$WORK/removed.out")"
+grep -q '^argv: exec' "$STUB_LOG" \
+  && bad "brig shell reached the runtime -- got: $(grep '^argv: exec' "$STUB_LOG")" \
+  || ok "brig shell reaches no runtime"
 retired 'brig info' env claude
 retired 'brig run -d' create claude
 retired '<agent>@<label>' run claude --name retn -d

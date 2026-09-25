@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,8 +232,6 @@ func TestRetiredLifecycleSpellingsWorkAndNameTheirReplacement(t *testing.T) {
 	}{
 		{[]string{"create", "claude"}, "brig run -d"},
 		{[]string{"exec", "claude", "--", "true"}, "brig sh"},
-		{[]string{"shell", "claude"}, "brig sh"},
-		{[]string{"shell", "claude", "echo", "hi"}, "brig sh"},
 		{[]string{"reset"}, "brig rm --all"},
 		{[]string{"env", "claude"}, "brig info"},
 	} {
@@ -323,5 +322,39 @@ func TestNameFlagRetiresOntoTheLabel(t *testing.T) {
 	})
 	if notice != "" {
 		t.Errorf("the label form printed a notice:\n%s", notice)
+	}
+}
+
+// brig shell is the first retired spelling to be removed rather than kept. It
+// shared sh's branch, so every change to sh changed it too without the checks
+// sh gets on the way in; a usage error that names sh is what is left of it.
+// It refuses before anything is looked up, so a bare `brig shell` and one
+// naming an agent that does not exist get the same answer, and it prints no
+// deprecation notice, since there is no longer anything that works to
+// deprecate.
+func TestRemovedShellVerbNamesSh(t *testing.T) {
+	for _, args := range [][]string{
+		{"shell"},
+		{"shell", "claude"},
+		{"shell", "claude", "echo", "hi"},
+		{"shell", "no-such-agent"},
+	} {
+		line := "brig " + strings.Join(args, " ")
+		scratchHost(t)
+		var err error
+		stderr := captureStderr(t, func() {
+			_, err = captureStdout(t, func() error { return run(args) })
+		})
+		var ue *usageError
+		if !errors.As(err, &ue) {
+			t.Errorf("%s: %v, want a usage error", line, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "brig sh") {
+			t.Errorf("%s: %q does not name brig sh", line, err)
+		}
+		if strings.Contains(stderr, "is now") {
+			t.Errorf("%s printed a deprecation notice for a verb that no longer runs: %q", line, stderr)
+		}
 	}
 }

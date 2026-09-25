@@ -32,13 +32,16 @@ place a secret cannot leak. `--json` works on the read verbs, and on `run` and
 `script/smoke.sh`. See [docs/cli.md](cli.md#exit-codes) for the table.
 
 **Retired spellings.** Every retired command, subverb and flag on this page
-still works and prints one line naming its replacement. They are scheduled for
-removal in 0.3. `brig run` is never removed.
+still works and prints one line naming its replacement, except `brig shell`,
+which was removed ahead of the others. They are scheduled for removal in 0.3.
+`brig run` is never removed.
 
 ## The deprecation window
 
 A retired spelling keeps working for at least one release after Brig prints
-its notice, and the current window closes at 0.3.
+its notice, and the current window closes at 0.3. `brig shell` closed early:
+0.2.0 printed its notice, and it was removed in the release after. The reason
+is in [docs/migration.md](migration.md#removed).
 [docs/migration.md](migration.md) has the notice example and the full mapping
 of retired spellings.
 

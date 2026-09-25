@@ -5,9 +5,10 @@ exit codes, checked against the code that implements them. See
 [quickstart.md](quickstart.md) for the walkthrough of a first run. Read this
 page when you already know what you want and need the exact syntax.
 
-Every old spelling still works for one more release. This page teaches only
-the current one. [migration.md](migration.md) has the full old-to-new table
-and the deprecation window.
+Every old spelling but one still works for one more release, and
+[migration.md](migration.md#removed) names the one that is gone. This page
+teaches only the current one. [migration.md](migration.md) has the full
+old-to-new table and the deprecation window.
 
 ## Everyday commands
 

@@ -1,15 +1,15 @@
 # Moving off the retired spellings
 
 Brig renamed most of its commands while it was still a prerelease. Every old
-spelling on this page still works today. Each one prints one line on stderr
-naming its replacement, in this form:
+spelling on this page but one still works today. Each one prints one line on
+stderr naming its replacement, in this form:
 
 ```
 brig: `brig profiles` is now `brig agent ls`
 ```
 
-The old spellings are scheduled for removal in 0.3. `brig run` is never
-removed. If you have a script written against an older spelling, this page is
+The old spellings are scheduled for removal in 0.3. `brig shell` has gone
+already; see [Removed](#removed). `brig run` is never removed. If you have a script written against an older spelling, this page is
 the whole list of what to change. One entry is not a spelling at all: a word
 on the `brig run` line changed meaning, and it prints nothing. See
 [One word whose meaning changed](#one-word-whose-meaning-changed).
@@ -30,7 +30,6 @@ over your own files, or watch stderr for the notice.
 | `brig policies` | `brig policy ls` |
 | `brig create <ref>` | `brig run -d <ref>` |
 | `brig exec <ref> -- <cmd>` | `brig sh <ref> <cmd>` |
-| `brig shell <ref>` | `brig sh <ref>` |
 | `brig env <ref>` | `brig info <ref>` |
 | `brig reset` | `brig rm --all` |
 
@@ -39,9 +38,30 @@ answer on, so a script that ran `brig reset` unattended needs
 `brig rm --all -y`. The same applies to `brig reset` itself: without a
 terminal it also refuses unless `-y` is passed.
 
+`brig shell` is not in the table because it is no longer a working spelling.
+See [Removed](#removed).
+
 There is deliberately no `brig template edit`. The retired group kept only the
 verbs it already had, so asking for that one is an error rather than a
 deprecation notice.
+
+## Removed
+
+`brig shell` is gone. It was the retired spelling of `brig sh`, and it now
+fails with a usage error that names `brig sh`, before Brig looks anything up
+or starts anything:
+
+```
+brig: `brig shell` was removed. `brig sh <ref>` opens a login shell, and `brig sh <ref> <command>` runs one
+```
+
+The change to a line that used it is the same as before: `brig shell <ref>`
+is `brig sh <ref>`, and `brig shell <ref> <command>` is
+`brig sh <ref> <command>`.
+
+It went ahead of the other old spellings because it was never a translation
+of `brig sh`. It ran through the same code as `sh`, so every change to `sh`
+changed it too, without the checks `sh` makes before it boots anything.
 
 ## Subverbs
 
