@@ -1,8 +1,9 @@
-# Move Claude Desktop sessions into Brig
+# Move Claude sessions into Brig
 
-You can carry Claude Desktop sessions into a `claude-desktop` sandbox by
-copying two sets of files into the guest home. This page walks through that
-for the Code tab, on macOS.
+You can carry Claude sessions into a Brig sandbox by copying files into the
+guest home. This page covers the Claude Desktop Code tab, which runs in the
+`claude-desktop` sandbox, and then the Claude Code CLI, which runs in
+`claude-code`. Both are on macOS.
 
 This was tried on macOS 26 with Brig 0.2.0 and hull 0.1.0-rc21, with one
 session. The session appeared in the Code tab of the sandbox. Opening it
@@ -10,7 +11,9 @@ resumed it in `/work/<name>`, and the new message was appended to the copied
 transcript with every earlier line unchanged. Brig's own tests do not cover
 this. Try it on one session before you move the rest.
 
-## What a session is made of
+## Claude Desktop
+
+### What a session is made of
 
 The Desktop app keeps one session in two places on the host:
 
@@ -35,7 +38,7 @@ The project is mounted at `/work/<name>` in the guest, so that is the working
 directory the guest sees. A session that still names the host path is not
 listed against the project.
 
-## Steps
+### Steps
 
 The commands below copy and never move. Brig and this procedure read your host
 files and write only under the guest home.
@@ -106,7 +109,7 @@ files and write only under the guest home.
    `$HOME_DIR/.claude/projects/-work-app/` grows by the new lines, and the
    copy on your host does not change.
 
-## Logging in
+### Logging in
 
 Claude Desktop in the sandbox asks you to sign in on the first run. The
 sign-in opens a browser window inside the sandbox. After you finish signing
@@ -118,11 +121,58 @@ The login lives in the guest home, under `.config/Claude`, so it survives
 which fills a credential Brig forwards by name. See
 [authentication.md](authentication.md).
 
-## What the first run costs
+### What the first run costs
 
 On the machine this was tried on, the first `brig run claude-desktop` pulled
 the image and grew `~/.hull` by about 3 GB, and took about 20 minutes. A later
 run of the same image does not pull again.
+
+## Claude Code CLI
+
+The CLI keeps a session in the transcript alone. It has no session list entry,
+so the Desktop steps 4 and 5 do not apply. The `claude-code` profile already
+keeps `.claude/projects` on host disk, so you change no profile.
+
+This was tried the same way: one session, macOS 26, Brig 0.2.0. In the
+sandbox, `claude --resume <id>` found the copied session and appended to it,
+every earlier line was unchanged, and the model answered from the history. The
+interactive picker from a bare `claude --resume` was not tried, and the run used
+the plain `claude-code` ref, not a label.
+
+1. Copy the transcripts of the project into the guest home, as in
+   [Claude Desktop step 2](#steps).
+
+   ```bash
+   HOME_DIR=~/brig-homes/cli
+   mkdir -p "$HOME_DIR/.claude/projects/-work-app"
+   cp -p ~/.claude/projects/-Users-you-code-app/*.jsonl \
+     "$HOME_DIR/.claude/projects/-work-app/"
+   ```
+
+2. Give the guest your login, then run. Brig forwards the login at boot, so
+   import it before the run.
+
+   ```bash
+   brig secret import claude-code
+   brig run claude-code@moved ~/code/app --home "$HOME_DIR"
+   ```
+
+3. Inside the sandbox, the project is the working directory. Resume by id:
+
+   ```bash
+   claude --resume <id>
+   ```
+
+   The id is the file name of the transcript without `.jsonl`.
+
+If the model call fails with `OAuth session expired and could not be
+refreshed`, the login on your host has expired. Run `claude` on the host and
+log in, run `brig secret import claude-code` again, and stop and run the
+sandbox again. The failed call still appends lines to the copied transcript.
+
+Use a label such as `claude-code@moved`. Running the plain `claude-code` ref
+with a different `--home` moves an existing `claude-code` session onto that
+home, and its record no longer points at the old one.
 
 ## Limits
 
