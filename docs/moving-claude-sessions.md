@@ -1,13 +1,14 @@
 # Move Claude Desktop sessions into Brig
 
-Brig has no command that imports Claude Desktop sessions. You can still carry
-them across by copying two sets of files into the guest home before the first
-run. This page walks through that for the Code tab, on macOS.
+You can carry Claude Desktop sessions into a `claude-desktop` sandbox by
+copying two sets of files into the guest home. This page walks through that
+for the Code tab, on macOS.
 
-Brig did not verify this as part of its tests. One maintainer ran it once,
-with one session, on Brig 0.2.0 and hull 0.1.0-rc21. It showed the session in
-the Code tab of the sandbox. Nobody checked that the session resumes with its
-full history. Try it on a copy of one session before you trust it with the rest.
+This was tried on macOS 26 with Brig 0.2.0 and hull 0.1.0-rc21, with one
+session. The session appeared in the Code tab of the sandbox. Opening it
+resumed it in `/work/<name>`, and the new message was appended to the copied
+transcript with every earlier line unchanged. Brig's own tests do not cover
+this. Try it on one session before you move the rest.
 
 ## What a session is made of
 
@@ -101,7 +102,9 @@ files and write only under the guest home.
    ```
 
 5. Quit the app in the sandbox and open it again. The Code tab lists the
-   session.
+   session. Open it and send a message. The transcript under
+   `$HOME_DIR/.claude/projects/-work-app/` grows by the new lines, and the
+   copy on your host does not change.
 
 ## Logging in
 
