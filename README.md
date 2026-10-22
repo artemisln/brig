@@ -43,6 +43,18 @@ For Linux, `install.sh` or a source build, see
 | Intel Mac | No |
 | Linux, x86-64 or arm64 | Yes, with the runtime bundle `install.sh` installs |
 
+## Update
+
+Update Brig the way you installed it:
+
+```bash
+brew update && brew upgrade --cask brig     # Homebrew
+curl -fsSL https://raw.githubusercontent.com/brig-sh/brig/main/install.sh | sh   # install.sh
+```
+
+Then run `brig version`. [Update Brig](https://brig.sh/docs/install/#update-brig)
+covers Linux, pinning a version, and what to restart.
+
 ## First run
 
 ```bash

@@ -298,6 +298,39 @@ A `hull` that you build from source cannot boot a sandbox without a Developer
 ID certificate. See
 [Building hull from source on macOS](runtimes.md#building-hull-from-source-on-macos).
 
+## Update Brig
+
+Update with the tool that installed Brig. `brig version` shows which version
+you have.
+
+| Installed with | Update with |
+| --- | --- |
+| Homebrew | `brew update && brew upgrade --cask brig` |
+| `install.sh`, macOS | Run `install.sh` again |
+| `install.sh`, Linux | Run `install.sh` again, under `sudo` for a node-wide install |
+| A source build | `git pull`, then `make build` |
+
+`install.sh` installs the newest release, release candidates included. To
+land on a specific version, pin it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brig-sh/brig/main/install.sh | BRIG_VERSION=v0.4.0 sh
+```
+
+The tap can lag the newest release. If `brew upgrade` stops short of the
+version you want, use `install.sh` with `BRIG_VERSION`.
+
+After an update:
+
+- Run `brig doctor`.
+- Restart a running `brigd`, because a daemon started before the update keeps
+  serving the old code.
+- Read [migration.md](migration.md) when you jump several releases. A minor
+  release can retire a command spelling.
+
+Use one install route per machine. Updating a Homebrew install with
+`install.sh`, or the reverse, leaves two copies of `brig` on `PATH`.
+
 ## Verify the install
 
 ```bash
