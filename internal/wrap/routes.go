@@ -1,0 +1,391 @@
+package wrap
+
+import (
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/brig-sh/brig/api/policy/v1alpha1"
+	"github.com/brig-sh/brig/internal/creds"
+	"github.com/brig-sh/brig/internal/injector"
+	"github.com/brig-sh/brig/internal/policy"
+	"github.com/brig-sh/brig/internal/profile"
+	"github.com/brig-sh/brig/internal/routemode"
+	"github.com/brig-sh/brig/internal/runtime"
+)
+
+// routeServer registers a sandbox's routes and mints the session tokens of
+// one exec. brig-broker is the one a run uses; a test passes its own.
+type routeServer interface {
+	// Register registers s, starting the broker when none is running, and
+	// returns the loopback port the broker serves routes on, with its answer.
+	Register(s injector.Sandbox) (int, injector.AddResponse, error)
+	// Mint returns a session token for one route of a registered sandbox.
+	Mint(r injector.MintRequest) (string, error)
+	// Forget removes a sandbox, which refuses its tokens from then on, and
+	// stops the broker when no sandbox is left. It starts nothing.
+	Forget(id string) error
+	// Status is what a running broker reports, and false when none answers.
+	// A broker whose process is alive and does not answer reports its PID
+	// alone, with false. It starts nothing.
+	Status() (injector.Status, bool)
+}
+
+// brokerProcess is the routeServer of a run: brig-broker, in the broker
+// directory under ~/.brig/host.
+type brokerProcess struct {
+	client *injector.Client
+}
+
+func (b *brokerProcess) Register(s injector.Sandbox) (int, injector.AddResponse, error) {
+	dir, err := injector.Dir()
+	if err != nil {
+		return 0, injector.AddResponse{}, err
+	}
+	running, err := injector.Register(dir, s)
+	if err != nil {
+		return 0, injector.AddResponse{}, err
+	}
+	b.client = &running.Client
+	return running.Status.Port, running.Added, nil
+}
+
+func (b *brokerProcess) Mint(r injector.MintRequest) (string, error) {
+	if b.client == nil {
+		return "", injector.ErrNotRunning
+	}
+	return b.client.Mint(r)
+}
+
+func (b *brokerProcess) Forget(id string) error {
+	dir, err := injector.Dir()
+	if err != nil {
+		return err
+	}
+	return injector.Forget(dir, id)
+}
+
+func (b *brokerProcess) Status() (injector.Status, bool) {
+	dir, err := injector.Dir()
+	if err != nil {
+		return injector.Status{}, false
+	}
+	running, ok := injector.Running(dir)
+	if !ok {
+		pid, _ := injector.LivePID(dir)
+		return injector.Status{PID: pid}, false
+	}
+	return running.Status, true
+}
+
+// routeBroker is c.broker, or brig-broker.
+func (c *Config) routeBroker() routeServer {
+	if c.broker == nil {
+		c.broker = &brokerProcess{}
+	}
+	return c.broker
+}
+
+// routesOf merges the routes of the bound policies, and names the policy that
+// declares each.
+func routesOf(bound []policy.Policy) ([]v1alpha1.Route, map[string]string, error) {
+	routes, err := policy.Routes(bound)
+	if err != nil {
+		return nil, nil, err
+	}
+	owner := map[string]string{}
+	for _, p := range bound {
+		for _, r := range p.Spec.Routes {
+			owner[r.Name] = p.Metadata.Name
+		}
+	}
+	return routes, owner, nil
+}
+
+// routeRefusal is why this run cannot serve its routes, or nil. A route in a
+// mode besides endpoint is checked first (see modeRefusal). A microVM or a
+// container reaches an endpoint route at brig.internal, which hull on hvi and
+// nerdctl route to the broker; on any other run path, a run with a route is
+// refused rather than booted without the routes its policy names (see
+// endpointCheck).
+//
+// Read-only, like sessionRefusal, which returns it.
+func (c *Config) routeRefusal() error {
+	if c.routesErr != nil {
+		return fmt.Errorf("the policies bound to %s cannot apply together: %w", c.Profile.Name, c.routesErr)
+	}
+	if err := c.modeRefusal(); err != nil {
+		return err
+	}
+	if len(c.routes) == 0 || c.Runtime == nil {
+		return nil
+	}
+	if c.brigInternal() {
+		if err := c.endpointCheck(); err != nil {
+			return fmt.Errorf("policy %s declares a route in mode endpoint, which the guest reaches at %s: %w",
+				c.endpointList(), injector.BrigInternal, err)
+		}
+	}
+	if c.Network == NetOffline {
+		return fmt.Errorf("policy %s declares routes, and this run has no network (BRIG_NETWORK=none) to "+
+			"reach them on; refusing the run rather than booting without them", c.routeList())
+	}
+	return nil
+}
+
+// brigInternal reports whether this run's guest reaches the broker at
+// brig.internal: a run with a route in mode endpoint.
+func (c *Config) brigInternal() bool {
+	return c.Runtime != nil && len(c.endpointRoutes()) > 0
+}
+
+// endpointRoutes are this run's routes in mode endpoint.
+func (c *Config) endpointRoutes() []v1alpha1.Route {
+	var out []v1alpha1.Route
+	for _, r := range c.routes {
+		if r.Mode == "" || r.Mode == v1alpha1.ModeEndpoint {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// endpointCheck is why this run's runtime cannot route brig.internal from its
+// guest to the broker, or nil.
+func (c *Config) endpointCheck() error {
+	return runtime.CheckBrigInternal(c.Runtime, c.routePath(), c.Network.RuntimeNet())
+}
+
+// endpointList names each route in mode endpoint, with the policy that
+// declares it, the way a refusal does.
+func (c *Config) endpointList() string {
+	var names []string
+	for _, r := range c.endpointRoutes() {
+		names = append(names, fmt.Sprintf("%s (route %s)", c.routePolicy[r.Name], r.Name))
+	}
+	return strings.Join(names, ", ")
+}
+
+// routePath is the run path this run's route modes are answered for.
+func (c *Config) routePath() runtime.RunPath {
+	return runtime.RoutePath(c.Runtime, c.hypervisor())
+}
+
+// routeList names each policy with its routes, the way a refusal does.
+func (c *Config) routeList() string {
+	byPolicy := map[string][]string{}
+	var order []string
+	for _, r := range c.routes {
+		p := c.routePolicy[r.Name]
+		if _, ok := byPolicy[p]; !ok {
+			order = append(order, p)
+		}
+		byPolicy[p] = append(byPolicy[p], r.Name)
+	}
+	var out []string
+	for _, p := range order {
+		out = append(out, fmt.Sprintf("%s (route %s)", p, strings.Join(byPolicy[p], ", ")))
+	}
+	return strings.Join(out, ", ")
+}
+
+// serveRoutes registers this sandbox's routes with the broker, mints a
+// session token per route for this exec, and records what the guest is
+// handed. Called on every exec: a token is minted per exec, and the same
+// registration again keeps the tokens of an agent already running valid.
+func (c *Config) serveRoutes(set creds.Set) error {
+	if len(c.routes) == 0 {
+		return nil
+	}
+	b := c.routeBroker()
+	s := injector.Sandbox{ID: c.VMName, Profile: c.Profile.Name}
+	for _, r := range c.routes {
+		s.Routes = append(s.Routes, injector.Route{Policy: c.routePolicy[r.Name], Route: r})
+	}
+	// The guest's brig.internal is its own gateway's address, which the
+	// runtime diverts to the broker. The broker serves brig.internal on
+	// connections to that address alone.
+	if c.brigInternal() {
+		router, ok := c.Runtime.(runtime.BrigInternalRouter)
+		if !ok {
+			return fmt.Errorf("the runtime %s cannot say where its guest reaches %s", c.Runtime.Kind(),
+				injector.BrigInternal)
+		}
+		addr, err := router.BrigInternalAddr(c.VMName)
+		if err != nil {
+			return fmt.Errorf("could not find where the guest of %s reaches %s: %w", c.VMName,
+				injector.BrigInternal, err)
+		}
+		s.BrigInternal = addr.String()
+	}
+	// Each route mode besides endpoint adds what the broker needs, and the
+	// setup the boot hands the runtime.
+	c.routeSetup = nil
+	for _, m := range c.otherModes() {
+		h := routeModeOf(m)
+		if h == nil {
+			return fmt.Errorf("the routes of %s: %s", c.VMName, routemode.NotInBuild(m))
+		}
+		setup, err := h.register(c, &s)
+		if err != nil {
+			return err
+		}
+		c.routeSetup = append(c.routeSetup, setup...)
+	}
+	_, added, err := b.Register(s)
+	if err != nil {
+		return fmt.Errorf("could not register the routes of %s with the credential broker: %w", c.VMName, err)
+	}
+	// The gateway is handed the socket before the broker answers, from the
+	// same function. A broker that listens elsewhere would leave the route's
+	// connections reset.
+	if s.BrigInternal != "" || len(s.Modes) > 0 {
+		want := c.diverts()
+		if !want.Requested() || added.DivertSocket != want.Socket {
+			return fmt.Errorf("the credential broker listens for the diverted connections of %s on %q, "+
+				"and brig expected %q; stop the broker with `brig stop` on every sandbox and run again",
+				c.VMName, added.DivertSocket, want.Socket)
+		}
+	}
+	if s.BrigInternal != "" {
+		ca, err := checkBrigCA(added.CA)
+		if err != nil {
+			return fmt.Errorf("the credential broker handed over a brig CA that brig will not put in the "+
+				"guest: %w", err)
+		}
+		c.brigCA = ca
+	}
+	tokens := map[string]string{}
+	for _, r := range c.routes {
+		token, err := b.Mint(injector.MintRequest{
+			Sandbox:    c.VMName,
+			Session:    c.RawName,
+			Route:      r.Name,
+			TTLSeconds: int64(injector.TokenTTL / time.Second),
+		})
+		if err != nil {
+			return fmt.Errorf("could not mint a session token for route %s: %w", r.Name, err)
+		}
+		tokens[r.Name] = token
+	}
+	ep := injector.HostEndpoint{Transport: injector.TransportBrigInternal}
+	vars, err := ep.GuestEnv(c.VMName, c.routes, tokens, set.Vars)
+	if err != nil {
+		return err
+	}
+	c.routeVars = vars
+	return nil
+}
+
+// forgetRoutes revokes this sandbox's session tokens: the broker stops
+// serving it, and stops itself when no sandbox is left. A failure is said
+// and does not fail the stop.
+func (c *Config) forgetRoutes() {
+	if err := c.routeBroker().Forget(c.VMName); err != nil {
+		c.warnf("the credential broker could not revoke the session tokens of %s: %v", c.VMName, err)
+	}
+	if err := forgetModes(c.VMName); err != nil {
+		c.warnf("could not remove what the routes of %s left on the host: %v", c.VMName, err)
+	}
+}
+
+// RevokeRoutes removes the sandbox vmName from the credential broker, which
+// refuses its session tokens from the next request on, and stops the broker
+// when no sandbox is left. It starts nothing. brig rm --all and brig reset
+// call it for each sandbox they remove, beside ForgetSandbox, because they
+// remove sandboxes without a Config.
+func RevokeRoutes(vmName string) error {
+	return errors.Join((&brokerProcess{}).Forget(vmName), forgetModes(vmName))
+}
+
+// forgetModes removes what each route mode besides endpoint left on the host
+// for sandbox vmName.
+func forgetModes(vmName string) error {
+	var errs []error
+	for _, m := range registeredModes() {
+		errs = append(errs, routeModeOf(m).forget(vmName))
+	}
+	return errors.Join(errs...)
+}
+
+// RevokeAllRoutes removes every sandbox the credential broker still has
+// registered, and stops it. It returns the ids it removed. brig rm --all
+// and brig reset call it after their own removals, for the registrations no
+// runtime list reaches. It starts nothing.
+func RevokeAllRoutes() ([]string, error) {
+	dir, err := injector.Dir()
+	if err != nil {
+		return nil, err
+	}
+	return injector.ForgetAll(dir)
+}
+
+// brokeredSecrets are the secrets the routes inject. Each stays on the host,
+// whatever the profile binds it to.
+func brokeredSecrets(routes []v1alpha1.Route) map[string]string {
+	out := map[string]string{}
+	for _, r := range routes {
+		if r.Credential != nil && r.Credential.SecretRef.Name != "" {
+			out[r.Credential.SecretRef.Name] = r.Name
+		}
+	}
+	return out
+}
+
+// namesBrokered reports whether a binding's chain names a brokered secret.
+func namesBrokered(refs []string, brokered map[string]string) bool {
+	for _, raw := range refs {
+		r, err := profile.ParseRef(raw)
+		if err == nil && r.Namespace == profile.NamespaceSecrets {
+			if _, ok := brokered[r.Name]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// withRoutes returns the profile and the env bindings a run with routes
+// delivers. A secret a route injects is never delivered to the guest: a
+// files: binding of it is dropped, an env binding whose chain names it is
+// dropped whole, so an ambient value cannot stand in for it either, and it
+// leaves the profile's secrets list, so brig does not read it. The broker
+// reads it on the host. skipped names each secret a route injects, whether
+// or not the profile delivers it.
+func withRoutes(t profile.Profile, bindings []profile.EnvBinding, routes []v1alpha1.Route) (
+	profile.Profile, []profile.EnvBinding, []string) {
+	brokered := brokeredSecrets(routes)
+	if len(brokered) == 0 {
+		return t, bindings, nil
+	}
+	var files []profile.FileBinding
+	for _, b := range t.Files {
+		if namesBrokered([]string{b.Ref}, brokered) {
+			continue
+		}
+		files = append(files, b)
+	}
+	keepBinding := func(in []profile.EnvBinding) []profile.EnvBinding {
+		var out []profile.EnvBinding
+		for _, b := range in {
+			if namesBrokered(b.RefList(), brokered) {
+				continue
+			}
+			out = append(out, b)
+		}
+		return out
+	}
+	var secrets []profile.SecretDecl
+	for _, d := range t.Secrets {
+		if _, ok := brokered[d.Name]; !ok {
+			secrets = append(secrets, d)
+		}
+	}
+	t.Files, t.Secrets = files, secrets
+	t.Env = keepBinding(t.Env)
+	bindings = keepBinding(bindings)
+	return t, bindings, slices.Sorted(maps.Keys(brokered))
+}

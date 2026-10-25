@@ -182,12 +182,19 @@ Two host reads do happen on a run, and no setting turns either off:
 Brig does with the answers. They do not stop the reads.
 
 A credential reaches the guest by one of two channels. The profile picks the
-channel for each secret.
+channel for each secret. A third channel, `broker`, keeps the credential on
+the host. A policy's [route](policies.md#routes) names the secret, and the
+guest gets a session token for the route in its place. This release serves a
+route to hull on `hvi` and to nerdctl with urunc at `brig.internal`.
 
 | Channel | What it does |
 | --- | --- |
 | `files:` | Writes the credential into the guest at the path the agent already reads |
 | `env:` | Binds the credential as an environment variable, for a credential whose consumer offers no file interface |
+| `broker` | Keeps the credential in `brig-broker`, which adds it to each request the guest sends through the route. The guest gets a session token and the route URL. A `files:` or `env:` binding of the same secret is dropped |
+
+`brig info --json` names the channel of each credential as its `source`:
+`environment`, `secret`, `file` or `broker`.
 
 For an `env.<name>` binding, or the deprecated `forward:` spelling of one,
 Brig still reads the named variable from its own environment. Whatever
@@ -326,6 +333,10 @@ credential. The sandbox cannot use a credential it cannot see. Brig forwards
 the credential and limits the blast radius. It does not use a sentinel value
 or a host-side proxy (see
 [A TLS-terminating host proxy](non-goals.md#a-tls-terminating-host-proxy)).
+A [route](policies.md#routes) is the exception. There the sandbox sees a
+session token, which works through its route until it expires or the
+sandbox is stopped. On hull and nerdctl the guest also trusts the brig CA,
+for `brig.internal` alone.
 
 The `claude-code` credential stays off host disk only while the agent has
 `CLAUDE_CONFIG_DIR`. Brig hands it to every process it starts in the sandbox.
@@ -1002,7 +1013,8 @@ every backend.
 
 On nerdctl a policy of either default also refuses the addresses of the
 network namespace that holds the sandbox's bridge. DNS and ping to the bridge
-address are the exception.
+address are the exception, and so is port 443 of the bridge address on a
+run with a route.
 
 | nerdctl | Whose namespace | Effect |
 | --- | --- | --- |
@@ -1010,6 +1022,14 @@ address are the exception.
 | Rootless | rootlesskit's | The rules judge the host's own addresses like any other |
 
 There is no equivalent on `vz`, `qemu` or docker.
+
+A run with a route reaches one host service by design: the credential
+broker, at `brig.internal` on port 443. On nerdctl that is port 443 of the
+bridge address, which the sandbox's table redirects to the relay of its
+resolver. On `hvi` it is port 443 of the sandbox's gateway address, which
+the gateway diverts. Either way the connection reaches only the broker,
+through the sandbox's divert socket. See
+[Transports](broker.md#transports).
 
 ### Sandbox to sandbox
 

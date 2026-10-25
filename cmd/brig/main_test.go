@@ -16,6 +16,10 @@ import (
 // literal, so a test that looks a profile up has to load the built-ins the way
 // main does. No test here writes to it, so once for the package is enough.
 func TestMain(m *testing.M) {
+	// Before the settings below, which are the tests' and not brig's.
+	if os.Getenv(brigHelperEnv) == "1" {
+		brigHelper()
+	}
 	if err := profile.Load(); err != nil {
 		panic(err)
 	}
@@ -30,6 +34,15 @@ func TestMain(m *testing.M) {
 	}
 	if err := os.Setenv("BRIG_GATEWAY_DIR", gw); err != nil {
 		panic(err)
+	}
+	// The credential broker's directory follows BRIG_STATE_DIR. A stop or an
+	// rm asks a broker running there to forget the sandbox, and without this
+	// a case would ask the one serving the real sandboxes of whoever runs the
+	// tests. A case that needs a directory of its own still sets one.
+	if os.Getenv("BRIG_STATE_DIR") == "" {
+		if err := os.Setenv("BRIG_STATE_DIR", filepath.Join(gw, "state")); err != nil {
+			panic(err)
+		}
 	}
 	code := m.Run()
 	_ = os.RemoveAll(gw)

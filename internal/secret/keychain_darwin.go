@@ -4,6 +4,7 @@ package secret
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -48,6 +49,8 @@ const (
 
 type keychain struct {
 	service string
+	// ctx bounds every security(1) call. Nil means no bound.
+	ctx context.Context
 	// beforeSeal, when set, runs before every sealed write. Tests use it to
 	// make that write fail at the one point a create has to roll back.
 	beforeSeal func() error
@@ -58,10 +61,18 @@ type keychain struct {
 // that has to change, instead of at some distant call site.
 var _ Store = keychain{}
 var _ Annotator = keychain{}
+var _ ContextStore = keychain{}
 
 func open() (Store, error) { return keychain{service: service}, nil }
 
 func (k keychain) Kind() string { return "keychain" }
+
+// WithContext returns the keychain with every security(1) call bound to ctx.
+// A call still running when ctx ends is killed.
+func (k keychain) WithContext(ctx context.Context) Store {
+	k.ctx = ctx
+	return k
+}
 
 // maxLine is the buffer security(1) reads one interactive command into.
 // Measured on macOS 15: a line of 4095 characters and its newline is accepted
@@ -79,9 +90,10 @@ const maxLine = 4096
 //
 // Quoting is safe to do by hand here because nothing variable on this line
 // needs it: the service is a constant, the key is base64, and the name has
-// been through ValidName, so it holds only letters, digits, - and _. The
-// label is the one argument with a space in it, and its shape is fixed. -j's
-// argument is safe unquoted for the same reason: Encode's base64url output
+// been through validStoreName, so it holds only letters, digits, - and _,
+// and the dot of a journal's suffix. The label is the one argument with a
+// space in it, and its shape is fixed. -j's argument is safe unquoted for
+// the same reason: Encode's base64url output
 // holds only letters, digits, - and _, which is the whole point of that
 // encoding (see Provenance.Encode).
 func (k keychain) writePrefix(name string, update bool, p Provenance) (string, error) {
@@ -161,6 +173,11 @@ func (k keychain) writePrefix(name string, update bool, p Provenance) (string, e
 // and one more update or import repairs it. Once an item holds a key every
 // concurrent update shares it, so the window is that first move only.
 func (k keychain) Write(name string, value []byte, p Provenance, update bool) error {
+	// The name rides the interactive line unquoted, so it is checked here
+	// and not only on the update arm, where keyFor reads the item first.
+	if err := validStoreName(name); err != nil {
+		return err
+	}
 	key, err := k.keyFor(name, update)
 	if err != nil {
 		return err
@@ -210,11 +227,20 @@ func (k keychain) keyFor(name string, update bool) ([]byte, error) {
 // nil for a command that reads none. A failure carries security's own
 // explanation and, through errors.As, its exit code, which status reads.
 func (k keychain) security(stdin io.Reader, args ...string) (string, error) {
-	cmd := exec.Command(securityBin, args...)
+	ctx := k.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, securityBin, args...)
 	cmd.Stdin = stdin
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
+		// A killed process exits with a signal, which says nothing about
+		// why. The context does.
+		if cerr := ctx.Err(); cerr != nil {
+			return "", fmt.Errorf("security did not finish: %w", cerr)
+		}
 		return "", securityError(err, errb.String())
 	}
 	return out.String(), nil
@@ -303,7 +329,7 @@ func (k keychain) verify(name string, value []byte, update bool) error {
 }
 
 func (k keychain) Create(name string, value []byte) error {
-	if err := ValidName(name); err != nil {
+	if err := validStoreName(name); err != nil {
 		return err
 	}
 	return k.write(name, value, false)
@@ -369,7 +395,7 @@ func (k keychain) Read(name string) ([]byte, error) {
 // marked key for a sealed secret, base64 of the value for one written
 // before sealing.
 func (k keychain) readItem(name string) (string, error) {
-	if err := ValidName(name); err != nil {
+	if err := validStoreName(name); err != nil {
 		return "", err
 	}
 	return k.readLine(name)
@@ -395,7 +421,7 @@ func (k keychain) readLine(account string) (string, error) {
 // to lose it is to delete the secret between the two calls, and the outcome
 // is a secret that exists again rather than damage.
 func (k keychain) Update(name string, value []byte) error {
-	if err := ValidName(name); err != nil {
+	if err := validStoreName(name); err != nil {
 		return err
 	}
 	// No existence probe of its own: Write reads the key item first, and
@@ -409,7 +435,7 @@ func (k keychain) Update(name string, value []byte) error {
 // with no key item, left by a create that failed between its two steps, is
 // swept up here too, and the caller still learns there was no secret.
 func (k keychain) Delete(name string) error {
-	if err := ValidName(name); err != nil {
+	if err := validStoreName(name); err != nil {
 		return err
 	}
 	itemErr := k.deleteItem(name)

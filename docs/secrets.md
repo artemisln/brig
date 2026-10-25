@@ -142,6 +142,12 @@ brig: delete "gh-token"? The value cannot be recovered [y/N] y
 deleted gh-token
 ```
 
+If `brig-broker` left a [renewal journal](#the-renewal-journal) for the
+secret, `delete` removes it too. The journal can hold a renewed copy of the
+value. It removes a journal whose secret is already gone as well, and says
+`deleted the renewal journal <name>.journal`, since no other command takes
+the journal's name.
+
 If there is no terminal to ask on, `delete` refuses:
 
 ```console
@@ -409,7 +415,9 @@ service `sh.brig.secret`.
 | `<name>.sealed` | the value, encrypted with AES-256-GCM under that key. The name of the secret is bound in, so a sealed item moved under another name does not open |
 
 `brig secret ls` never shows the sealed item. The dot puts its name outside
-the name rules, and the listing skips such names.
+the name rules, and the listing skips such names. The same holds for
+`<name>.journal`, which exists only while `brig-broker` renews the secret.
+See [The renewal journal](#the-renewal-journal).
 
 Brig uses two items because of a limit in `security -i`. Brig writes a
 keychain item through `security -i`, which reads one command into a 4096-byte
@@ -454,6 +462,136 @@ reads a key item refuses it as an item it did not write. It never gives the
 key bytes to a guest.
 
 </details>
+
+## A secret behind a route
+
+A policy's [route](policies.md#routes) names a secret in this store. On a run
+with that route, Brig does not read the secret and does not deliver it.
+`brig-broker` reads it from the store on each request through the route, and
+adds it on the host. The guest gets a session token. A `files:` or `env:`
+binding of the same secret in the profile is dropped for that run, and
+`brig info` lists it as kept on the host.
+
+Before boot, Brig lists the store and checks that the secret is there. It
+reads no value. A run whose route's secret is missing, or whose store does
+not open, is refused with exit `6`, and the message names the command that
+puts the secret there. A secret removed after the boot makes the route
+answer 502, and the audit line in `~/.brig/host/broker/audit.log` names the
+check. Create or import the secret, and the next request finds it.
+
+## Renewal on the host
+
+`brig-broker` renews a secret this way for a run whose
+[route](policies.md#routes) serves it, on hull with `hvi` and nerdctl with
+urunc ([Transports](broker.md#transports)). Every other run still delivers
+`claude-credentials` as a file, and
+[What file delivery buys](security.md#what-file-delivery-buys-and-what-it-costs)
+still describes that.
+
+A credential type can carry a lifecycle. The lifecycle renews the stored
+value on the host, so the guest never holds what it renews with. The first
+one is `anthropic-oauth`, for the `claude-credentials` document that
+`brig secret import claude-code` stores.
+
+| | `anthropic-oauth` |
+| --- | --- |
+| What refreshes | The OAuth pair in `claudeAiOauth`: `accessToken`, `refreshToken` and `expiresAt` |
+| When | 10 minutes before `expiresAt`, or halfway through the life of a pair Brig refreshed when that life is shorter than 20 minutes, and once when the provider refuses the access token |
+| From where | The host, to the provider's token endpoint over HTTPS, with system roots and full verification. Never through a broker route, and never after a redirect. The host's proxy settings (`HTTPS_PROXY`, `NO_PROXY`) apply |
+| What is written back | The same document with the three fields replaced. Every other field is kept. The provenance keeps its `FROM`, and its expiry moves to the new `expiresAt` |
+| What is refused | An answer that is not a 200 with an access token and a refresh token. Brig keeps the old document and writes nothing. For another status it reports the status code. For a 200 it cannot use, it reports a fixed error and nothing from the body |
+
+An answer with both tokens and an expiry outside 60 seconds to 30 days is
+kept, with `expiresAt` set to 0. Brig then renews that pair when the
+provider refuses its access token.
+
+The provider rotates the refresh token single-use. A refresh makes the
+previous document invalid, so one owner on the host refreshes each secret,
+one refresh at a time. Two sandboxes that share the secret wait on the same
+refresh.
+
+Once a refresh request has reached the provider, Brig does not send that
+refresh token again, whatever fails after it. The provider may already have
+rotated it. Brig serves the old document until its own expiry and reports
+the refresh as failing. A refresh that never reached the provider is tried
+again 30 seconds later at the earliest.
+
+The new document is written back to the store before its access token is
+used. If that write fails, Brig keeps the new document in memory and retries
+the write 30 seconds later at the earliest. Until the write lands, the secret
+holds a document the provider already refuses, and the new document is in
+[the renewal journal](#the-renewal-journal).
+
+Brig reads the store again before every refresh, before every write-back,
+and at least every 5 minutes. A deleted secret stops being served. A secret
+you import again replaces the document in memory, and a pending write-back
+never overwrites it. A refresh or a write-back whose read fails waits for
+one that succeeds, so Brig never spends a refresh token on a document that
+an import has already replaced. A read cut short because the request that
+made it was canceled, or ran out of time, is not a failed read. A secret deleted, or imported again in a
+form Brig cannot read, while a refresh runs fails the request that waited on
+it. After a failed refresh, log in on the host and run
+`brig secret import claude-code`.
+
+The import copies the host's own refresh token. Brig and Claude Code on the
+host then hold the same pair, and whichever side refreshes first invalidates
+the copy the other holds. Brig's write-back keeps its own store current. It
+does not reach the host's Claude Code. Do not run Claude Code on the host
+against the same account during a brokered run.
+
+### The renewal journal
+
+Between the provider's answer and the write-back, the new refresh token is
+only in the memory of `brig-broker`. A crash there, or a host that loses
+power, would leave the store with a spent token. So the broker journals each
+refresh in the store, next to the secret, as `<name>.journal`. The journal
+is a store item like the secret, with the same provenance, and never a file.
+
+A refresh takes these steps. Each step is one store write.
+
+1. The broker creates the journal in phase `renewing`. It records when the
+   refresh started and the SHA-256 of the document it starts from. The
+   create fails if a journal is already there. If the journal cannot be
+   written, the refresh is not sent, Brig reports it as failing, and the
+   broker tries again 30 seconds later at the earliest.
+2. The broker calls the provider.
+3. The journal moves to phase `renewed`, and now holds the new document.
+4. The secret takes the new document.
+5. The broker deletes the journal.
+
+A write that fails stops at its step. The broker retries it 30 seconds later
+at the earliest, and serves the new document from memory meanwhile. No other
+refresh of the secret starts until the journal is gone. A refused access
+token in that window is not renewed again.
+
+When the broker next serves the secret, it reads the journal first. It also
+does this when a sandbox registers a route for the secret, without waiting
+for a request.
+
+| state found | what the broker does | what you see |
+| --- | --- | --- |
+| No journal | Nothing | Nothing |
+| `renewed`, and the secret is still the document the refresh started from | Writes the journal's document to the secret, and deletes the journal. It does not call the provider | `brig doctor` reports `refresh recovering` until the write lands. The run goes on with the renewed token |
+| `renewed`, and the secret already holds the journal's document | Deletes the journal | Nothing |
+| `renewing`, and the secret is still the document the refresh started from | Keeps the secret, deletes the journal, and renews once at the next request, whatever the expiry. The refresh may have reached the provider, and the provider may have rotated the stored token | `refresh recovering` until the provider answers. If the provider refuses the token as spent, the secret is reported as failing and is not renewed again. Log in on the host and import again |
+| Any journal, and the secret changed since the refresh started | Deletes the journal. A secret you imported again is newer than the journal | Nothing |
+| A journal of another broker that still runs, younger than 10 minutes | Leaves it alone, does not renew, and serves the stored document until it expires. It reads the journal again every 30 seconds | `refresh recovering` |
+| A journal of another broker, older than 10 minutes or dated in the future | The broker treats it as left by a broker that stopped | As above for its phase |
+| A journal of this broker that it did not know of | Deletes it, and renews 30 seconds later. The journal comes from a create that landed and reported a failure, so no refresh followed it | `refresh failing` until that renewal |
+| A journal Brig cannot read: damaged in the store, not one Brig wrote, or a `renewed` document that is not a credential of the secret's kind | Keeps the secret, deletes the journal, and renews once, as for `renewing` | As for `renewing` |
+| The store does not answer | Serves the stored document, and reads the journal again 30 seconds later at the earliest | `refresh recovering` |
+
+The journal records the process id of its broker and the start time of that
+process. A broker counts as running when a process of yours has that id and
+that start time. `brig secret delete` removes the journal with the secret.
+`brig secret read` and `delete` refuse a journal's own name, because a
+journal can hold the only valid copy of a renewed credential.
+
+One broker refreshes a secret, one refresh at a time. The broker keeps one
+owner per secret, and its lock keeps one broker per state directory. The
+journal create is a second guard. It fails while another journal is there
+on macOS. On Linux, the Secret Service looks the name up before it creates
+the item, so two creates at once can both succeed.
 
 ## Linux
 

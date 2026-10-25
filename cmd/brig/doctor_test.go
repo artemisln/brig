@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/brig-sh/brig/internal/injector"
 	"github.com/brig-sh/brig/internal/profile"
 	"github.com/brig-sh/brig/internal/runtime"
 	"github.com/brig-sh/brig/internal/secret"
@@ -384,5 +388,123 @@ func TestDoctorRuntimeFixNamesTheProfilesRuntimeBin(t *testing.T) {
 	}
 	if strings.Contains(rt.Fix, "BRIG_RUNTIME_BIN") || !strings.Contains(rt.Fix, "runtimeBin") {
 		t.Errorf("the fix %q should name the profile's runtimeBin, not BRIG_RUNTIME_BIN", rt.Fix)
+	}
+}
+
+// The broker row says whether brig-broker has started, and fails a broker
+// directory anyone else can enter, which holds the keys that sign tokens.
+// It never gates the exit status.
+func TestDoctorBrokerCheck(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("BRIG_STATE_DIR", state)
+	if c := brokerCheck(); c.State != stateInfo {
+		t.Errorf("before any route ran: %+v", c)
+	}
+	dir := filepath.Join(state, "host", "broker")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := brokerCheck()
+	if c.State != stateFail || !strings.Contains(c.Fix, "chmod 700") || c.err != nil {
+		t.Errorf("an open broker directory: %+v", c)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "port"), []byte("40123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c := brokerCheck(); c.State != stateInfo || !strings.Contains(c.Finding, "port 40123") {
+		t.Errorf("a broker that is not running: %+v", c)
+	}
+	// Another process on the recorded port receives the tokens of every
+	// client of the port, so the row fails and names it.
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = squatter.Close() }()
+	port := squatter.Addr().(*net.TCPAddr).Port
+	if err := os.WriteFile(filepath.Join(dir, "port"), []byte(fmt.Sprintf("%d\n", port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c = brokerCheck()
+	if c.State != stateFail || !strings.Contains(c.Finding, fmt.Sprintf("its port %d", port)) || c.err != nil {
+		t.Errorf("a port held by another process: %+v", c)
+	}
+	if _, err := exec.LookPath("lsof"); err == nil && !strings.Contains(c.Finding, fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Errorf("the row does not name the holder, this test's pid %d: %s", os.Getpid(), c.Finding)
+	}
+	t.Logf("doctor: %s", c.Finding)
+}
+
+// The report has a broker row on every host: nerdctl on Linux serves routes
+// through brig-broker as hull on macOS does. The row does not gate the exit
+// status.
+func TestDoctorHasABrokerRowOnEveryHost(t *testing.T) {
+	healthyHost(t)
+	t.Setenv("BRIG_STATE_DIR", t.TempDir())
+	checks := runDoctor(nil, nil)
+	if c := findCheck(t, checks, "broker"); c.State != stateInfo || c.err != nil {
+		t.Errorf("a broker that never started: %+v", c)
+	}
+	if err := doctorExit(checks); err != nil {
+		t.Errorf("the broker row gated the exit status: %v", err)
+	}
+}
+
+// A broker settling a refresh journal says so on the broker row, by name,
+// without failing it. A refresh that failed still fails the row.
+func TestDoctorBrokerRowNamesARecovery(t *testing.T) {
+	c := brokerStatusCheck(injector.Status{PID: 7, Port: 40123, Recovering: []string{"claude-credentials"}})
+	if c.State != statePass || !strings.Contains(c.Finding, "refresh recovering: claude-credentials") {
+		t.Errorf("a broker recovering a refresh: %+v", c)
+	}
+	c = brokerStatusCheck(injector.Status{PID: 7, Port: 40123})
+	if strings.Contains(c.Finding, "recovering") {
+		t.Errorf("a broker with nothing to recover: %+v", c)
+	}
+	c = brokerStatusCheck(injector.Status{PID: 7, Port: 40123,
+		Recovering: []string{"claude-credentials"}, Failing: []string{"claude-credentials"}})
+	if c.State != stateFail {
+		t.Errorf("a broker whose recovery found the pair spent: %+v", c)
+	}
+}
+
+// A route mode registered in this build adds its row, after the host's own
+// rows and ahead of the boot. Its row informs and never fails the report.
+func TestDoctorCarriesTheRowOfARegisteredMode(t *testing.T) {
+	healthyHost(t)
+	saved := modeChecks
+	t.Cleanup(func() { modeChecks = saved })
+	var asked []runtime.Runtime
+	modeChecks = append(modeChecks, func(_ *profile.Profile, rt runtime.Runtime) check {
+		asked = append(asked, rt)
+		return check{Name: "relay", State: stateInfo, Finding: "relay is served"}
+	})
+	checks := runDoctor(nil, nil)
+	if c := findCheck(t, checks, "relay"); c.State != stateInfo || c.Finding != "relay is served" {
+		t.Errorf("the relay row is %+v", c)
+	}
+	if len(asked) != 1 || asked[0] == nil {
+		t.Errorf("the row was asked with %v", asked)
+	}
+	relay, boot := -1, -1
+	for i, c := range checks {
+		switch c.Name {
+		case "relay":
+			relay = i
+		case "boot":
+			boot = i
+		}
+	}
+	if relay < 0 || boot < 0 || relay > boot {
+		t.Errorf("the relay row is at %d and the boot row at %d", relay, boot)
+	}
+	if err := doctorExit(checks); err != nil {
+		t.Errorf("an informational row changed the exit: %v", err)
 	}
 }
